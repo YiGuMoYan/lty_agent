@@ -10,7 +10,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_DIR = os.path.join(BASE_DIR, 'lty_universal')
 GRAPH_PATH = os.path.join(BASE_DIR, 'lty_graph.json')
 PICKLE_PATH = os.path.join(BASE_DIR, 'lty_graph.pkl')
-SONG_DATA_PATH = os.path.join(BASE_DIR, 'song', 'lyrics.jsonl')
+SONG_DATA_PATH = os.path.join(BASE_DIR, 'dataset', 'song', 'lyrics.jsonl')
 PROMPT_PATH = os.path.join(BASE_DIR, 'prompt', 'SYSTEM_PROMPT_SMART')
 
 # LLM Config
