@@ -41,7 +41,8 @@ class IntentRouter:
             "   User: '你知道为了你唱下去这首歌吗' -> {\"tool\": \"search_lyrics\", \"args\": {\"song_title\": \"为了你唱下去\"}}\n"
             "   User: '勾指起誓谁写的' -> {\"tool\": \"search_lyrics\", \"args\": {\"song_title\": \"勾指起誓\"}}\n"
             "   User: '歌词里有那句 机械的心率' -> {\"tool\": \"search_lyrics\", \"args\": {\"lyrics_snippet\": \"机械的心率\"}}\n"
-            "   User: '达拉崩吧的歌词' -> {\"tool\": \"search_lyrics\", \"args\": {\"song_title\": \"达拉崩吧\"}}\n\n"
+            "   User: '达拉崩吧的歌词' -> {\"tool\": \"search_lyrics\", \"args\": {\"song_title\": \"达拉崩吧\"}}\n"
+            "   User: 'ilem有什么作品' -> {\"tool\": \"search_lyrics\", \"args\": {\"artist_name\": \"ilem\"}}\n\n"
             
             "   # 2. Entity Facts & Biography\n"
             "   User: 'ilem是谁' -> {\"tool\": \"query_knowledge_graph\", \"args\": {\"entity_name\": \"ilem\", \"relation_type\": \"artist\"}}\n"

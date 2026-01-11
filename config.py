@@ -17,9 +17,10 @@ SONG_DATA_PATH = os.path.join(BASE_DIR, 'dataset', 'song', 'lyrics.jsonl')
 PROMPT_PATH = os.path.join(BASE_DIR, 'prompt', 'SYSTEM_PROMPT_SMART')
 
 # LLM Config
-OLLAMA_URL = os.getenv("LLM_API_BASE", "http://192.168.1.221:11434/api/chat")
+OLLAMA_URL = os.getenv("LLM_API_BASE", "http://localhost:11434/api/chat")
 MODEL_NAME = os.getenv("LLM_MODEL_NAME", "lty_v6:7b")
-DEBUG = True
+API_KEY = os.getenv("LLM_API_KEY", "ollama") # Default dummy key for Ollama
+DEBUG = os.getenv("DEBUG", "True").lower() == "true"
 
 # Graph Config
 MAX_HOP_DEPTH = 2

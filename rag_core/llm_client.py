@@ -24,7 +24,7 @@ class LLMClient:
         print(f"[LLMClient] Connecting to {base_url} (Model: {self.model_name})")
         
         self.client = OpenAI(
-            api_key="ollama", # Dummy key required
+            api_key=config.API_KEY, 
             base_url=base_url
         )
 

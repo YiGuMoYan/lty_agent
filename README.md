@@ -113,4 +113,4 @@ rag_lty/
 -   **强制重构索引**：删除 `dataset/vector_store` 目录即可触发全量重建。
 
 ---
-*Created by Antigravity Agent for YiGuMoYan.*
+*Created by YiGuMoYan.*

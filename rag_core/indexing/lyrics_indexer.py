@@ -99,6 +99,27 @@ class LyricsIndexer:
         
         return candidates
 
+    def get_songs_by_artist(self, artist_name):
+        """
+        Find songs by artist (P-Master).
+        """
+        results = []
+        # Robust Logic: Check if artist_name is in p_masters list
+        # p_masters is usually a list of strings, e.g. ["ilem", "Luo Tianyi"]
+        # or maybe just a string in some dirty data?
+        for song in self.songs:
+            masters = song.get("p_masters", [])
+            # Handle if masters is string or list
+            if isinstance(masters, str):
+                masters = [masters]
+            
+            # Case-insensitive check
+            for m in masters:
+                if artist_name.lower() in m.lower():
+                    results.append(song)
+                    break 
+        return results
+
 if __name__ == "__main__":
     # Simple test
     indexer = LyricsIndexer()

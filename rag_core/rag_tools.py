@@ -1,5 +1,6 @@
 
 import json
+import re  # Added for keyword extraction
 from .indexing.lyrics_indexer import LyricsIndexer
 from .indexing.fact_indexer import FactIndexer
 from .indexing.graph_indexer import GraphIndexer
@@ -49,6 +50,17 @@ def search_lyrics(lyrics_snippet=None, song_title=None, **kwargs):
     if not query:
          return json.dumps([])
 
+    # New Feature: Artist Search
+    artist = kwargs.get("artist_name")
+    if artist:
+        print(f"[Tool] search_lyrics: artist='{artist}'")
+        songs = lyrics_idx.get_songs_by_artist(artist)
+        if songs:
+            # Return list of titles
+            titles = [s.get("song_title") for s in songs[:10]]
+            return json.dumps({"artist": artist, "songs": titles}, ensure_ascii=False)
+        return json.dumps({"status": "not_found", "message": f"No songs found for artist {artist}"})
+
     # Heuristic: If short, assume title; if long, snippet? Or try both.
     # Try logic: exact title match first
     songs = lyrics_idx.get_song_by_title(query)
@@ -72,10 +84,26 @@ def search_knowledge_base(query, filter_category=None):
     # Clean query and extract potential topic keywords (only Nouns/Names)
     keywords = re.findall(r'[\u4e00-\u9fffA-Za-z0-9]+', query)
     stop_words = {"the", "and", "meaning", "perspective", "song", "who", "wrote", "of", "about", "for", "is", "was", "to", "this", "that", "it"}
+    
     for kw in keywords:
         if len(kw) < 2 or kw.lower() in stop_words: continue
-        # Try to find a doc with this topic metadata
-        matches = fact_idx.search_facts(kw, filter_dict={"topic": kw}, top_k=2)
+        
+        # 1. Fuzzy Check via Graph (The "Did you mean?" layer)
+        # We search graph for this keyword. If matches found, we use the MATCHED entity name.
+        graph_matches = graph_idx.search_graph(kw)
+        target_topic = kw # Default to asking strictly
+        
+        if graph_matches:
+            # Use the "result" field from graph search which is the standardized node name
+            # Graph search returns list of dicts. We look for 'DirectMatch' or best candidate.
+            best_match = graph_matches[0]["result"]
+            if best_match != kw:
+                print(f"[RAG Tools] Auto-Correcting '{kw}' -> '{best_match}' (via Graph)")
+                target_topic = best_match
+        
+        # 2. Topic Search in Vector DB (High Priority)
+        # Now we search for the CORRECTED topic
+        matches = fact_idx.search_facts(target_topic, filter_dict={"topic": target_topic}, top_k=2)
         if matches:
             topic_results.extend(matches)
     
@@ -130,7 +158,8 @@ TOOLS_SCHEMA = [
                 "type": "object",
                 "properties": {
                     "lyrics_snippet": {"type": "string", "description": "A snippet of lyrics to search for"},
-                    "song_title": {"type": "string", "description": "The title of the song to search lyrics for"}
+                    "song_title": {"type": "string", "description": "The title of the song to search lyrics for"},
+                    "artist_name": {"type": "string", "description": "Search for songs by a specific artist/producer (e.g. 'ilem', 'COP')"}
                 }
             }
         }
