@@ -2,6 +2,8 @@
 import json
 import os
 import networkx as nx
+import pickle
+import difflib  # For fuzzy matching
 
 class GraphIndexer:
     def __init__(self, topics_path=None):
@@ -90,28 +92,38 @@ class GraphIndexer:
         """
         results = []
         
-        # 1. Try Exact/Startswith Match on Nodes
+        # 1. Try Exact Match on Nodes
         if self.graph.has_node(entity_name):
-            start_node = entity_name
+            # If exact match, return the node itself and its neighbors
+            results.append({"entity": entity_name, "type": "Matched Node", "relation": "self"})
+            for neighbor in self.graph.neighbors(entity_name):
+                edge_data = self.graph.get_edge_data(entity_name, neighbor)
+                relation = edge_data.get("relation", "related_to")
+                results.append({"entity": neighbor, "type": "Neighbor", "relation": relation})
+            return results[:15] # Limit results
         else:
-            # 2. Keyword Search (Fallback, with Multi-Keyword Support)
-            # Support space-separated keywords treated as "AND" logic
-            keywords = entity_name.split()
-            candidates = []
+            # 2. Try partial keyword match (AND logic) using difflib
+            # First, find candidates
+            all_nodes = list(self.graph.nodes)
             
-            for node in self.graph.nodes():
-                s_node = str(node)
-                # Check if ALL keywords are present in the node name
-                if all(k in s_node for k in keywords):
-                    candidates.append(node)
+            # A. Case-insensitive substring match
+            candidates = [n for n in all_nodes if entity_name.lower() in n.lower()]
             
+            # B. If no substring match, try Fuzzy Match (difflib)
+            if not candidates:
+                # cutoff=0.6 means 60% similarity
+                fuzzy_matches = difflib.get_close_matches(entity_name, all_nodes, n=3, cutoff=0.6)
+                if fuzzy_matches:
+                    print(f"[GraphIndexer] Fuzzy match: '{entity_name}' -> {fuzzy_matches}")
+                    candidates = fuzzy_matches
+
+            # If we found candidates (Substring or Fuzzy)
+            # If we found candidates (Substring or Fuzzy)
             if candidates:
-                # If we found matches, return them immediately as results (not just neighbors)
-                # Because the node ITSELF is the fact (e.g. "2025年...演唱会")
-                # We return the node content as "source" and its category as "target" (or vice versa)
                 refined_results = []
                 for cand in candidates[:10]: # Limit to avoid context overflow
                     # Get edges to find context (Category/Year)
+                    # Note: cand is just a string node ID
                     context_edges = self.graph.out_edges(cand, data=True)
                     rel_info = "related"
                     category_found = "Unknown"
@@ -123,7 +135,7 @@ class GraphIndexer:
                             category_found = str(target).replace("Category:", "")
                         
                     refined_results.append({
-                        "result": cand, # The full text of the node
+                        "result": cand, 
                         "type": "DirectMatch", 
                         "category": category_found,
                         "context": rel_info

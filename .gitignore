@@ -1,5 +1,23 @@
+
+# Environment & Config
 .env
 __pycache__/
-*.pkl
 *.pyc
-debug_*.py
+
+# RAG Generated Assets
+dataset/vector_store/
+dataset/graph_store/
+*.db
+*.sqlite3
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# Temporary
+test_kb_search.py
+verify_attribution.py
+debug_search.py

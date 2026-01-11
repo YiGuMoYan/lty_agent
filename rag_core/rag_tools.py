@@ -4,10 +4,21 @@ from .indexing.lyrics_indexer import LyricsIndexer
 from .indexing.fact_indexer import FactIndexer
 from .indexing.graph_indexer import GraphIndexer
 
-# Global instances (lazy loading recommended, but simpler here)
+# Global instances
 lyrics_idx = LyricsIndexer()
 fact_idx = FactIndexer()
 graph_idx = GraphIndexer()
+
+# --- Commercial Robustness: Startup Index Check ---
+# Only perform full scan if the collection is empty
+try:
+    if fact_idx.collection.count() == 0:
+        print("[RAG Tools] Initializing Vector DB for the first time...")
+        fact_idx.index_knowledge_base() 
+    else:
+        print(f"[RAG Tools] Vector DB ready ({fact_idx.collection.count()} chunks). Use scripts to refresh.")
+except Exception as e:
+    print(f"[RAG Tools] Auto-indexing warning: {e}")
 
 # --- Tool Functions ---
 
@@ -53,15 +64,40 @@ def search_knowledge_base(query, filter_category=None):
     Search vector knowledge base.
     """
     print(f"[Tool] search_knowledge_base: {query} (filter={filter_category})")
+    
+    # --- Commercial Robustness: Topic-Specific Priority Search ---
+    # If the query contains a known topic name (e.g. "COP", "ilem"), 
+    # and we find a file matching that topic, we prioritize it.
+    topic_results = []
+    # Clean query and extract potential topic keywords (only Nouns/Names)
+    keywords = re.findall(r'[\u4e00-\u9fffA-Za-z0-9]+', query)
+    stop_words = {"the", "and", "meaning", "perspective", "song", "who", "wrote", "of", "about", "for", "is", "was", "to", "this", "that", "it"}
+    for kw in keywords:
+        if len(kw) < 2 or kw.lower() in stop_words: continue
+        # Try to find a doc with this topic metadata
+        matches = fact_idx.search_facts(kw, filter_dict={"topic": kw}, top_k=2)
+        if matches:
+            topic_results.extend(matches)
+    
     filters = {"category": filter_category} if filter_category else None
-    # Increase top_k to ensure we get the full table if it's split across chunks, or just more context
-    results = fact_idx.search_facts(query, filters, top_k=5)
+    vector_results = fact_idx.search_facts(query, filters, top_k=5)
+    
+    # Merge, prioritizing topic matches
+    all_results = topic_results + vector_results
+    
+    # Deduplicate by content
+    seen = set()
+    unique_results = []
+    for r in all_results:
+        if r["content"] not in seen:
+            seen.add(r["content"])
+            unique_results.append(r)
     
     # Compress output for LLM
     compressed = []
-    for r in results:
+    for r in unique_results[:5]: # Limit to top 5 even after merge
         compressed.append({
-            "content": r["content"], # Maybe truncate if too long
+            "content": r["content"],
             "source": r["metadata"]["source"]
         })
     return json.dumps(compressed, ensure_ascii=False)
