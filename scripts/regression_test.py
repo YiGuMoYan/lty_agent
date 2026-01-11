@@ -1,7 +1,11 @@
+import sys
+import os
+import time
+
+# Add project root to sys.path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from rag_core.companion_agent import CompanionAgent
-import sys
-import time
 
 def run_test_case(agent, name, query):
     print(f"\n[{name}] User: {query}")

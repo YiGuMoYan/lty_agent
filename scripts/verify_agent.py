@@ -1,6 +1,10 @@
+import sys
+import os
+
+# Add project root to sys.path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from rag_core.companion_agent import CompanionAgent
-import sys
 
 def test_agent():
     print("Initializing Agent...")
