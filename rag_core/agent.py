@@ -58,6 +58,17 @@ class ActionAgent:
                     if DEBUG: print(f"  [System] Auto-triggering search for '{query}'...")
                     res = self.engine.deep_search(query)
                     
+                    # --- CRITICAL: Hallucination Guard ---
+                    # If query is a year (e.g. "2024"), ensure the result actually Mentions it.
+                    # Otherwise the LLM will hallucinate based on "2020-2025" ranges.
+                    import re
+                    year_match = re.match(r"^(\d{4})", query)
+                    if year_match:
+                        target_year = year_match.group(1)
+                        if target_year not in res:
+                            if DEBUG: print(f"  [System] Data mismatch! '{target_year}' not found in results. Suppressing.")
+                            res = f"【系统校验】检索结果中未包含 {target_year} 年的具体记录。请回答：'记不太清了'。"
+
                     # Inject Tool Result
                     full_injection = f"{injection_header}\n\n检索结果：\n{res}"
                     self.messages.append({"role": "system", "content": full_injection})
