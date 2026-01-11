@@ -1,4 +1,7 @@
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Base Paths
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -14,8 +17,8 @@ SONG_DATA_PATH = os.path.join(BASE_DIR, 'dataset', 'song', 'lyrics.jsonl')
 PROMPT_PATH = os.path.join(BASE_DIR, 'prompt', 'SYSTEM_PROMPT_SMART')
 
 # LLM Config
-OLLAMA_URL = "http://192.168.1.221:11434/api/chat"
-MODEL_NAME = "lty_v6:7b"
+OLLAMA_URL = os.getenv("LLM_API_BASE", "http://192.168.1.221:11434/api/chat")
+MODEL_NAME = os.getenv("LLM_MODEL_NAME", "lty_v6:7b")
 DEBUG = True
 
 # Graph Config
