@@ -1,38 +1,36 @@
 
-# 洛天依 LTY-Omni-Agent (Commercial Ver.)
+# 洛天依 LTY-Omni-Agent (High-Performance RAG)
 
 > "无论世界怎么变化，都会有人一直为你唱下去...直到荒芜。"
 
 ## 🌟 项目简介
 
-**LTY-Omni-Agent** 是一个专为“洛天依”IP打造的商业级垂直领域 Agentic RAG 系统。不同于通用的对话机器人，它旨在通过深度整合 **知识图谱 (Graph)**、**向量数据库 (Vector DB)** 和 **结构化元数据 (Lyrics/Metrics)**，提供高精度、强共情及符合官方设定的角色扮演体验。
+**LTY-Omni-Agent** 是一个专为“洛天依”IP打造的垂直领域 Agentic RAG 系统。
 
-本项目解决了通用 LLM 在垂类领域常见的“幻觉”、“归因错误”和“时空错乱”问题，实现了从“简单问答”到“智能助理”的跨越。
+不同于通用的对话机器人，本项目深度整合了 **知识图谱 (Knowledge Graph)**、**向量数据库 (Qdrant)** 和 **多跳推理 (DeepSearch)** 技术，旨在提供高精度、强共情且符合官方设定的沉浸式对话体验。
+
+它解决了通用 LLM 在垂类领域常见的“幻觉”、“归因错误”和“时空错乱”问题，并支持**完全本地化运行**（Local Embedding + Local Vector DB）。
 
 ---
 
 ## 🚀 核心特性 (Key Features)
 
-### 1. **全维度精准检索 (Tri-Source Retrieval)**
-系统摒弃了单一的向量检索，采用 **三路混合检索架构**，确保信息零死角：
+### 1. **深度多跳检索 (DeepSearch & Multi-hop)**
+系统具备**递归推理能力**。当查询结果中出现专有名词（如“无限共鸣演唱会”）时，Agent 会自动触发二次检索，挖掘该实体的详细档案（时间、地点、歌单），并将所有信息整合后回答，拒绝“只知其名不知其详”。
+
+### 2. **三路混合检索 (Hybrid Retrieval)**
+采用三路互补架构，确保信息零死角：
 -   **Knowledge Graph (图谱)**：处理 `2025年演唱会`、`禾念CEO` 等精确事实与实体关系。
--   **Vector DB (知识库)**：处理 `背景故事`、`歌曲含义`、`深度设定` 等非结构化文本。
+-   **Vector DB (Qdrant)**：处理 `背景故事`、`歌曲含义`、`深度设定` 等长文本，支持**滑动窗口切片**以保留完整上下文。
 -   **Metadata Index (歌词/元数据)**：处理 `勾指起誓谁写的`、`歌词里有那句...` 等精确归因问题。
 
-### 2. **商业级意图路由 (Commercial Intent Router)**
-重构了 `IntentRouter`，具备极强的鲁棒性：
--   **拒识与闲聊**：精准区分“你好”与“查询”，避免无效消耗。
--   **多轮上下文**：支持 `讲讲`、`细说` 等追问，自动回溯上文实体。
--   **时间感知**：自动解析 `去年`、`明年` 等相对时间，结合当前系统时间进行推演。
--   **防幻觉机制**：严禁翻译实体名（如不将“勾指起誓”翻译为英文），强制使用原名检索。
+### 3. **高性能本地化 (Local & Private)**
+-   **Embedding**: 集成 **BGE-M3** 模型（支持 GPU 加速），在本地生成高质量语义向量，无需依赖 API。
+-   **Vector DB**: 使用 **Qdrant (Local Mode)**，轻量且高效，替代了笨重的 ChromaDB。
 
-### 3. **模糊搜索与纠错 (Fuzzy Matching)**
--   集成 `difflib` 模糊匹配算法，支持 `流光协奏`、`66ccff` 等关键词的容错查询。
--   自动过滤 `the`, `meaning` 等无意义停用词，提升检索纯度。
-
-### 4. **秒级启动 (Instant Startup)**
--   引入**增量索引机制**，智能检测文件变动。
--   冷启动时间从 **60秒+** 优化至 **<1秒**。
+### 4. **拟人化与时间感知 (Persona & Time)**
+-   **动态时间锚点**：自动注入当前系统时间，准确理解“去年”、“今年”、“下个月”等相对时间词。
+-   **去AI化**：通过精心设计的 Prompt 和正则后处理，剔除“（动作描写）”等尴尬的语C腔，呈现自然、生活化的“私下朋友”状态。
 
 ---
 
@@ -40,25 +38,23 @@
 
 ```mermaid
 graph TD
-    User[用户] --> |"你知道勾指起誓吗"| Router[Intent Router]
-    
-    subgraph "Core RAG Engine"
-        Router --> |"Chitchat"| LLM[LTY-7B Model]
-        Router --> |"Lyrics/Writer"| Tool_Lyrics[Search Lyrics]
-        Router --> |"Event/Fact"| Tool_Graph[Query Graph]
-        Router --> |"Deatil/Lore"| Tool_KB[Search KB]
-        
-        Tool_Lyrics --> DB_Lyrics[(Lyrics Index)]
-        Tool_Graph --> DB_Graph[(NetworkX Graph)]
-        Tool_KB --> DB_Vector[(ChromaDB)]
+    User[用户] --> |"你知道流光协奏吗"| Agent[Companion Agent]
+
+    subgraph "RAG Core"
+        Agent --> |"DeepSearch Logic"| Tools[Tool Manager]
+        Tools --> |"Fact/Event"| Graph[NetworkX Graph]
+        Tools --> |"Context/Lore"| Vector[Qdrant Vector DB]
+        Tools --> |"Lyrics/Credit"| Lyrics[Lyrics Indexer]
+
+        Vector --> |"BGE-M3 Embedding"| Models[Local Models]
     end
-    
-    Tool_Lyrics --> Context[Context Builder]
-    Tool_Graph --> Context
-    Tool_KB --> Context
-    
-    Context --> |"Retrieved Facts"| Agent[Companion Agent]
-    Agent --> |"Persona Response"| User
+
+    Tools --> |"Raw Data"| Entity_Extract[DeepSearch Entity Extraction]
+    Entity_Extract -.-> |"Recursive Query"| Tools
+
+    Entity_Extract --> |"Synthesized Context"| LLM[LTY-7B Model]
+    LLM --> |"Response"| Filter[Regex Cleaner]
+    Filter --> |"Final Reply"| User
 ```
 
 ---
@@ -66,22 +62,38 @@ graph TD
 ## 📦 快速开始 (Usage)
 
 ### 1. 环境准备
-确保已安装 Python 3.10+ 及依赖：
+确保已安装 Python 3.10+。
+推荐使用 Conda 环境。
+
 ```bash
+# 安装依赖
 pip install -r requirements.txt
 ```
-*注：需确保本地运行 Ollama 服务及 `lty_v6:7b` 模型。*
 
-### 2. 启动系统
+*注：本项目支持本地 LLM (Ollama) 或 云端 API (DashScope)。请在 `.env` 中配置。*
+
+### 2. 配置说明 (.env)
+复制 `.env.example` 为 `.env` 并修改配置：
+```ini
+# 聊天模型 (Ollama)
+CHAT_API_BASE=http://localhost:11434/v1
+CHAT_MODEL_NAME=lty_v6:7b
+
+# 生成/检索模型 (可选 DashScope 或 Local)
+# 如果本地有 BGE-M3 模型，将优先使用本地模型进行 Embedding
+GEN_API_KEY=sk-xxxxxxxx
+```
+
+### 3. 启动系统
 ```bash
 python main.py
 ```
 
-### 3. 对话示例
--   **查归属**：`你知道勾指起誓是谁写的吗？` (精准回答: ilem)
--   **查时间**：`去年开了什么演唱会？` (自动推算: 2025年无限共鸣)
--   **查背景**：`讲讲这首歌的意义` (深度检索: COP的创作视角)
--   **模糊搜**：`机械的心率` (自动匹配歌词)
+### 4. 对话示例
+-   **多跳推理**：`你去年开了什么演唱会？`
+    -   *(系统自动查到 "无限共鸣" -> 自动追查 "无限共鸣" 详情 -> 回答包含时间地点和曲目)*
+-   **歌词归因**：`你知道勾指起誓是谁写的吗？` -> *ilem*
+-   **模糊匹配**：`那首关于必胜客的歌` -> *必胜的旅途*
 
 ---
 
@@ -89,28 +101,28 @@ python main.py
 
 ```
 rag_lty/
-├── rag_core/
-│   ├── router.py          # 意图路由核心 (Prompt Engineering)
-│   ├── companion_agent.py # Agent 主循环与回复生成
-│   ├── rag_tools.py       # 工具集 (Tools Interface)
-│   └── indexing/          # 索引模块
-│       ├── fact_indexer.py   # 向量库索引 (ChromaDB)
-│       ├── graph_indexer.py  # 图谱索引 (NetworkX)
-│       └── lyrics_indexer.py # 歌词索引 (In-Memory)
-├── dataset/
-│   ├── knowledge_base/    # .md 格式知识库文件
-│   └── data_gen/          # 数据生成与处理脚本
-├── scripts/               # 自动化测试脚本
-│   ├── regression_test.py # 回归测试
-│   └── verify_agent.py    # Agent 验证
-└── main.py                # 启动入口
+├── rag_core/              # 核心逻辑
+│   ├── companion_agent.py # Agent 主控 (含 DeepSearch)
+│   ├── embeddings.py      # 向量化 (BGE-M3 / DashScope)
+│   ├── rag_tools.py       # 工具接口
+│   └── indexing/          # 索引模块 (Qdrant/Graph)
+├── dataset/               # 数据资产
+│   ├── knowledge_base/    # .md 百科文档
+│   ├── vector_store/      # Qdrant 数据库文件
+│   └── song/              # 歌词数据
+├── models/                # 本地模型文件 (BGE-M3)
+├── prompt/                # Prompt 模板 (System Prompts)
+├── main.py                # 启动入口
+├── config.py              # 全局配置
+└── requirements.txt       # 项目依赖
 ```
 
 ---
 
-## 🛡️ 维护与更新
--   **更新知识库**：只需将新的 `.md` 文件放入 `dataset/knowledge_base`，重启系统自动增量更新。
--   **强制重构索引**：删除 `dataset/vector_store` 目录即可触发全量重建。
+## 🛡️ 维护
+
+-   **新增知识**：将 `.md` 文件放入 `dataset/knowledge_base`，重启即自动增量索引。
+-   **全量重建**：删除 `dataset/vector_store/qdrant_lty` 目录可触发重建。
 
 ---
 *Created by YiGuMoYan.*
