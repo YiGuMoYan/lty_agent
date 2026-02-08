@@ -9,23 +9,16 @@ import config
 
 class LLMClient:
     def __init__(self):
-        # Use config for model and URL
-        self.model_name = config.MODEL_NAME
-        
-        # Ollama usually exposes OpenAI compatible API at /v1
-        # config.OLLAMA_URL is likely '.../api/chat', we need base '.../v1' for OpenAI client
-        # Let's derive it or hardcode standard if typically 11434
-        
-        if "api/chat" in config.OLLAMA_URL:
-            base_url = config.OLLAMA_URL.replace("/api/chat", "/v1")
-        else:
-            base_url = config.OLLAMA_URL
-            
-        print(f"[LLMClient] Connecting to {base_url} (Model: {self.model_name})")
-        
+        # Use config for chat model
+        self.model_name = config.CHAT_MODEL_NAME
+        self.base_url = config.CHAT_API_BASE
+        self.api_key = config.CHAT_API_KEY
+
+        print(f"[LLMClient] Connecting to {self.base_url} (Model: {self.model_name})")
+
         self.client = OpenAI(
-            api_key=config.API_KEY, 
-            base_url=base_url
+            api_key=self.api_key,
+            base_url=self.base_url
         )
 
     def chat_with_tools(self, messages, tools=None, tool_choice="auto"):

@@ -3,19 +3,27 @@ import json
 from openai import OpenAI
 from dotenv import load_dotenv
 
-# Load key from .env
-load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), '.env'))
+# Add project root to path to import config
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+import config
 
 class QwenDriver:
     def __init__(self):
-        self.api_key = os.getenv("DASHSCOPE_API_KEY")
-        self.model_name = os.getenv("QWEN_MODEL", "qwen-plus")
+        self.api_key = config.GEN_API_KEY
+        self.model_name = config.GEN_MODEL_NAME
+        self.base_url = config.GEN_API_BASE
+
         if not self.api_key:
-            raise ValueError("DASHSCOPE_API_KEY not found in .env")
-            
+            # Fallback to check raw env if config didn't pick it up (though config should)
+            self.api_key = os.getenv("GEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
+
+        if not self.api_key:
+            raise ValueError("GEN_API_KEY not found in .env or config")
+
         self.client = OpenAI(
             api_key=self.api_key,
-            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+            base_url=self.base_url,
         )
 
     def search(self, query, model=None):

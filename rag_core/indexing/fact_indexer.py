@@ -1,30 +1,55 @@
-
 import os
 import re
-import chromadb
-from chromadb.config import Settings
 import uuid
+import json
+from tqdm import tqdm
+from qdrant_client import QdrantClient
+from qdrant_client.http import models
 
 class FactIndexer:
     def __init__(self, persist_directory=None):
         """
-        Initialize FactIndexer with ChromaDB.
+        Initialize FactIndexer with Qdrant (Local Mode).
         """
         if persist_directory is None:
             base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            persist_directory = os.path.join(base_dir, "dataset", "vector_store")
-            
+            persist_directory = os.path.join(base_dir, "dataset", "vector_store", "qdrant_lty")
+
         if not os.path.exists(persist_directory):
             os.makedirs(persist_directory)
-            
-        print(f"[FactIndexer] Initializing Vector DB at {persist_directory}")
-        # Use simple persistent client
-        self.client = chromadb.PersistentClient(path=persist_directory)
-        
-        # Create or get collection
-        # Note: Using default embedding function (usually all-MiniLM-L6-v2)
-        # For production Chinese, we would swap this with BGE-M3 or similar.
-        self.collection = self.client.get_or_create_collection(name="lty_facts")
+
+        print(f"[FactIndexer] Initializing Qdrant at {persist_directory}")
+        # Initialize Qdrant in local mode (path-based)
+        self.client = QdrantClient(path=persist_directory)
+        self.collection_name = "lty_facts"
+
+        # Determine vector dimension dynamically
+        from rag_core.embeddings import get_embedding_function, LocalBGEEmbeddingFunction
+        self.embedding_fn = get_embedding_function()
+
+        if isinstance(self.embedding_fn, LocalBGEEmbeddingFunction):
+            self.vector_dim = 1024
+        else:
+            self.vector_dim = 1536 # DashScope defaults
+
+        # Create collection if not exists
+        if not self.client.collection_exists(self.collection_name):
+            print(f"[FactIndexer] Creating collection {self.collection_name} with dim={self.vector_dim}")
+            self.client.create_collection(
+                collection_name=self.collection_name,
+                vectors_config=models.VectorParams(
+                    size=self.vector_dim,
+                    distance=models.Distance.COSINE
+                )
+            )
+
+    def count(self):
+        """Return number of entities in collection."""
+        try:
+            info = self.client.get_collection(self.collection_name)
+            return info.points_count
+        except:
+            return 0
 
     def _parse_markdown(self, file_path):
         """
@@ -43,62 +68,43 @@ class FactIndexer:
                 if ':' in line:
                     k, v = line.split(':', 1)
                     frontmatter[k.strip()] = v.strip()
-            # Remove frontmatter from content for splitting
             content = content[fm_match.end():]
 
         # Split by Headers (##)
-        # Simple regex splitting to keep context.
-        # We treat the text between headers as a chunk.
-        sections = []
-        # Find all headers
-        # This regex matches lines starting with #, ##, ###...
-        # We want to capture the header level, title, and the following content
-        
-        # Strategy: Split by "## " and preserve the header title in content
         parts = re.split(r'(^|\n)##\s+', content)
-        
-        current_header = "Introduction"
-        
-        # The first part is usually intro text before first H2
+
+        sections = []
         if parts[0].strip():
              sections.append({
                 "content": parts[0].strip(),
                 "section": "Introduction",
                 **frontmatter
             })
-            
-        # Iterate over rest (parts seem to alternate or behavior depends on split)
-        # re.split with capturing group returns [text, delimiter, text, delimiter...]
-        # Here delimiter captured is (^|\n) which is just newline.
-        # Let's use a simpler iterative approach for robustness.
-        
+
         lines = content.split('\n')
         buffer = []
         current_section = "Introduction"
-        
         chunk_list = []
-        
+
         for line in lines:
             if line.strip().startswith('## '):
-                # New section
                 if buffer:
                     chunk_list.append((current_section, "\n".join(buffer)))
                 buffer = []
                 current_section = line.strip().replace('#', '').strip()
-                buffer.append(line) # Keep header in content
+                buffer.append(line)
             else:
                 buffer.append(line)
-        
+
         if buffer:
              chunk_list.append((current_section, "\n".join(buffer)))
-             
-        # Format for indexing
+
         results = []
         base_name = os.path.basename(file_path)
         for section_title, text in chunk_list:
-            if len(text.strip()) < 10: # Skip empty/too short
+            if len(text.strip()) < 10:
                 continue
-                
+
             results.append({
                 "id": f"{base_name}#{section_title}",
                 "document": text,
@@ -109,96 +115,221 @@ class FactIndexer:
                     "topic": frontmatter.get("topic", base_name.replace('.md',''))
                 }
             })
-            
+
         return results
 
-    def index_knowledge_base(self, kb_root=None):
-        """Walk KB directory and index all md files."""
+    def _split_text_with_overlap(self, text, chunk_size=800, overlap=200):
+        """
+        Splits long text into overlapping chunks.
+        """
+        if len(text) <= chunk_size:
+            return [text]
+
+        chunks = []
+        start = 0
+        while start < len(text):
+            end = start + chunk_size
+            chunk = text[start:end]
+            chunks.append(chunk)
+            start += (chunk_size - overlap)
+        return chunks
+
+    def index_knowledge_base(self, kb_root=None, lyrics_path=None):
+        """Walk KB directory and index all md files and lyrics."""
+        base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
         if kb_root is None:
-            base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
             kb_root = os.path.join(base_dir, "dataset", "knowledge_base")
 
-        print(f"[FactIndexer] Scanning {kb_root}...")
-        
-        documents = []
-        metadatas = []
-        ids = []
-        
-        count = 0
+        if lyrics_path is None:
+            lyrics_path = os.path.join(base_dir, "dataset", "song", "cleaned_lyrics.jsonl")
+
+        print(f"[FactIndexer] Scanning Knowledge Base: {kb_root}")
+
+        texts_to_embed = []
+        temp_metas = [] # List of (uuid, payload)
+
+        # 1. Scan Markdown Files
+        md_files = []
         for root, dirs, files in os.walk(kb_root):
             for file in files:
                 if file.endswith(".md"):
-                    path = os.path.join(root, file)
-                    mtime = os.path.getmtime(path)
-                    
-                    # Heuristic: Check if this file + section ID is already in DB
-                    # For a truly commercial version, we'd store a local hash map of {file: mtime}.
-                    # Since Chroma.get is slow for 900 items, let's use a simpler check:
-                    # If the collection is populated, we only index files modified in the last 1 hour
-                    # (assuming the server was just updated).
-                    
-                    # For now, let's just make it skip parsing if the count is already large
-                    # Unless we are in a 'force' mode.
-                    chunks = self._parse_markdown(path)
-                    for chunk in chunks:
-                        # Add a tiny bit of metadata for tracking if needed
-                        chunk['metadata']['indexed_at'] = mtime
-                        documents.append(chunk['document'])
-                        metadatas.append(chunk['metadata'])
-                        ids.append(f"{chunk['id']}::{uuid.uuid4().hex[:8]}") 
-                        count += 1
-                        
-        if documents:
-            print(f"[FactIndexer] Found {len(documents)} new/updated chunks. Indexing...")
-            # Use metadata to track last indexed time if needed, 
-            # but for now, we just rely on the skip logic above to reduce data sent to Chroma.
-            
-            # Batch add
-            batch_size = 100
-            for i in range(0, len(documents), batch_size):
-                self.collection.upsert(
-                    ids=ids[i:i+batch_size],
-                    documents=documents[i:i+batch_size],
-                    metadatas=metadatas[i:i+batch_size]
-                )
-            print("[FactIndexer] Indexing complete.")
+                    md_files.append(os.path.join(root, file))
 
-        else:
-            print("[FactIndexer] No changes detected or no documents found to index.")
+        print(f"[FactIndexer] Found {len(md_files)} Markdown files.")
 
+        for path in tqdm(md_files, desc="Parsing Markdown"):
+            mtime = os.path.getmtime(path)
+            chunks = self._parse_markdown(path)
+            for chunk in chunks:
+                # Apply Sliding Window Chunking
+                sub_chunks = self._split_text_with_overlap(chunk['document'])
+
+                for i, sub_text in enumerate(sub_chunks):
+                    unique_id = str(uuid.uuid4())
+                    meta = chunk['metadata'].copy()
+                    meta['indexed_at'] = mtime
+                    meta['chunk_index'] = i
+                    meta['total_chunks'] = len(sub_chunks)
+
+                    payload = {
+                        "text": sub_text,
+                        "source": meta.get("source", ""),
+                        "category": meta.get("category", ""),
+                        "topic": meta.get("topic", ""),
+                        "full_metadata": meta
+                    }
+
+                    texts_to_embed.append(sub_text)
+                    temp_metas.append((unique_id, payload))
+
+        # 2. Scan Lyrics
+        if os.path.exists(lyrics_path):
+            print(f"[FactIndexer] Loading Lyrics from: {lyrics_path}")
+            try:
+                with open(lyrics_path, 'r', encoding='utf-8') as f:
+                    lyrics_data = [json.loads(line) for line in f if line.strip()]
+
+                print(f"[FactIndexer] Found {len(lyrics_data)} songs.")
+
+                for song in tqdm(lyrics_data, desc="Parsing Lyrics"):
+                    title = song.get("song_title", "Unknown")
+                    content = song.get("cleaned_lyrics", "")
+                    if not content:
+                        continue
+
+                    # Prepare metadata
+                    p_masters = song.get("p_masters", [])
+                    if isinstance(p_masters, list):
+                        p_masters_str = ", ".join(p_masters)
+                    else:
+                        p_masters_str = str(p_masters)
+
+                    song_meta = song.get("song_metadata", {})
+                    rag_text = f"歌曲：{title}\nP主/作者：{p_masters_str}\n\n{content}"
+
+                    # Chunk lyrics too (just in case they are super long)
+                    sub_chunks = self._split_text_with_overlap(rag_text)
+
+                    for i, sub_text in enumerate(sub_chunks):
+                        unique_id = str(uuid.uuid4())
+                        payload = {
+                            "text": sub_text,
+                            "source": "LyricsDB",
+                            "category": "Song",
+                            "topic": title,
+                            "full_metadata": {
+                                "title": title,
+                                "p_masters": p_masters,
+                                "type": "lyrics",
+                                "chunk_index": i
+                            }
+                        }
+                        texts_to_embed.append(sub_text)
+                        temp_metas.append((unique_id, payload))
+
+            except Exception as e:
+                print(f"[FactIndexer] Error loading lyrics: {e}")
+
+        if not temp_metas:
+            print("[FactIndexer] No documents found.")
+            return
+
+        print(f"[FactIndexer] Total chunks to index: {len(texts_to_embed)}")
+        print("[FactIndexer] Generating Embeddings (Batch)...")
+
+        try:
+            vectors = []
+            # Batch size lowered to prevent CUDA OOM
+            batch_size = 4
+            for i in tqdm(range(0, len(texts_to_embed), batch_size), desc="Embedding"):
+                batch_text = texts_to_embed[i:i+batch_size]
+                batch_vecs = self.embedding_fn(batch_text)
+                vectors.extend(batch_vecs)
+        except Exception as e:
+            print(f"[FactIndexer] Embedding generation failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return
+
+        # Combine into Qdrant Points
+        from qdrant_client.http.models import PointStruct
+        points_to_upsert = []
+        for i, (pid, payload) in enumerate(temp_metas):
+            points_to_upsert.append(PointStruct(id=pid, vector=vectors[i], payload=payload))
+
+        print(f"[FactIndexer] Inserting {len(points_to_upsert)} points into Qdrant...")
+
+        # Batch upsert
+        upsert_batch = 100
+        for i in tqdm(range(0, len(points_to_upsert), upsert_batch), desc="Upserting"):
+            batch = points_to_upsert[i:i+upsert_batch]
+            self.client.upsert(collection_name=self.collection_name, points=batch)
+
+        print("[FactIndexer] Indexing complete.")
 
     def search_facts(self, query, filter_dict=None, top_k=3):
         """
         Search for facts.
-        :param filter_dict: Metadata filter e.g. {"category": "Commercial"}
         """
         print(f"[FactIndexer] Searching: {query} with filter {filter_dict}")
-        results = self.collection.query(
-            query_texts=[query],
-            n_results=top_k,
-            where=filter_dict if filter_dict else None
-        )
-        
-        # Flatten results
+
+        # 1. Embed Query
+        try:
+            query_vector = self.embedding_fn([query])[0]
+        except Exception as e:
+            print(f"[FactIndexer] Embedding failed: {e}")
+            return []
+
+        # 2. Build Filter
+        query_filter = None
+        if filter_dict:
+            conditions = []
+            for k, v in filter_dict.items():
+                conditions.append(
+                    models.FieldCondition(
+                        key=k,
+                        match=models.MatchValue(value=v)
+                    )
+                )
+            if conditions:
+                query_filter = models.Filter(must=conditions)
+
+        # 3. Search
+        # Explicit check for search method availability (Qdrant client version compatibility)
+        if hasattr(self.client, "search"):
+             hits = self.client.search(
+                collection_name=self.collection_name,
+                query_vector=query_vector,
+                query_filter=query_filter,
+                limit=top_k
+            )
+        else:
+            # Fallback for some local clients or older versions
+             hits = self.client.query_points(
+                collection_name=self.collection_name,
+                query=query_vector,
+                query_filter=query_filter,
+                limit=top_k
+             ).points
+
+        # 4. Format Results
         refs = []
-        if results['documents']:
-            for i in range(len(results['documents'][0])):
-                refs.append({
-                    "content": results['documents'][0][i],
-                    "metadata": results['metadatas'][0][i],
-                    "distance": results['distances'][0][i] if results['distances'] else 0
-                })
+        for hit in hits:
+            refs.append({
+                "content": hit.payload.get("text", ""),
+                "metadata": hit.payload.get("full_metadata", {}),
+                "distance": hit.score,
+                "id": hit.id
+            })
+
         return refs
 
 if __name__ == "__main__":
-    # Test
     indexer = FactIndexer()
-    # indexer.index_knowledge_base() # Uncomment to build index
-    
-    # Check if we have data (assuming built previously or run once)
-    # For testing in development, we might want to run index once
-    indexer.index_knowledge_base() 
-    
+    if indexer.count() == 0:
+        indexer.index_knowledge_base()
+
     res = indexer.search_facts("洛天依代言过必胜客吗")
     for r in res:
-        print(f"\n--- Result ({r['metadata']['source']}) ---\n{r['content'][:100]}...")
+        print(f"\n--- Result ({r['metadata'].get('source', '?')}) ---\n{r['content'][:100]}...")

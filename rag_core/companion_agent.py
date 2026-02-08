@@ -19,8 +19,14 @@ class CompanionAgent:
         except Exception as e:
             print(f"[CompanionAgent] Warning: Could not load prompt from {PROMPT_PATH}: {e}")
             base_prompt = "你是洛天依。"
-            
-        self.system_prompt = base_prompt
+
+        # --- Commercial Robustness: Inject Time Perception ---
+        from datetime import datetime
+        current_date = datetime.now().strftime("%Y年%m月%d日")
+        # Prepend time context so the model knows "this year" vs "last year"
+        time_context = f"【系统时间锚点：当前是 {current_date}】\n(请根据此时间判断'去年'、'今年'等相对时间词)\n\n"
+
+        self.system_prompt = time_context + base_prompt
         self.history.append({"role": "system", "content": self.system_prompt})
 
     def chat(self, user_input):
@@ -47,51 +53,62 @@ class CompanionAgent:
                 try:
                     tool_result = function_to_call(**func_args)
                     
-                    # --- Commercial Robustness: Fallback Logic ---
-                    # If Graph Search returns only "Category" info (weak result) but user asked for "Who wrote X" (specifics),
-                    # we should Fallback to Vector Search.
-                    
-                    need_fallback = False
+                    # --- Commercial Robustness: DeepSearch (Multi-hop) ---
+                    # If we find specific entities (e.g. "Infinite Resonance") in the result,
+                    # we must look them up immediately so the model knows what they are.
+
+                    candidates = set()
+
+                    # 1. Extract from JSON Result
                     parsed_res = []
                     try:
                         parsed_res = json.loads(tool_result)
                     except:
                         pass
-                    
-                    if func_name == "query_knowledge_graph":
-                        # Heuristic: If we found "DirectMatch" but it only tells us the Category (e.g. "Discography"),
-                        # and implies we missed the Producer info (which is not in graph edges), trigger Vector Search.
-                        # Real commercial logic would parse the QUESTION intention deeper. 
-                        # For now, if result count is small or generic, we append Vector Search results.
-                        
-                        # Just ALWAYS append Vector Search for "Who/Detail" questions if Graph is just a Taxonomy.
-                        # Actually, let's just create a "DoubleCheck" mechanism.
-                        # If result is valid but maybe insufficient, we run search_knowledge_base in parallel?
-                        # Simplest Commercial Fix: If result contains "Category:Discography" or "Category:Timeline", 
-                        # also peek into the Vector DB using the entity name to get the "Content".
-                        
-                        if isinstance(parsed_res, list) and len(parsed_res) > 0:
-                            # Check if it looks like a Taxonomy Node
-                            first_hit = parsed_res[0]
-                            # If it's just a node classification, we likely need the MD content.
-                            # Let's auto-search KB for the same entity name.
-                            print(f"[Companion] Auto-detecting need for detail... Triggering KB & Lyrics Fallback for '{func_args.get('entity_name', '')}'")
-                            from .rag_tools import search_knowledge_base, search_lyrics
-                            
-                            # 1. Vector Search (Markdown)
-                            kb_res = search_knowledge_base(query=func_args.get('entity_name', ''))
-                            
-                            # 2. Lyrics Search (Metadata) - Check if it's a song to get P-Master info
-                            lyrics_res = search_lyrics(song_title=func_args.get('entity_name', ''))
-                            
-                            # Merge them
-                            tool_result = f"【图谱概要】 {tool_result}\n"
-                            if kb_res and kb_res != "[]":
-                                tool_result += f"\n【详细档案 (KB)】 {kb_res}"
-                            if lyrics_res and lyrics_res != "[]":
-                                tool_result += f"\n【歌曲元数据 (LyricsDB)】 {lyrics_res}"
 
-                    # --- End Fallback Logic ---
+                    if isinstance(parsed_res, list):
+                        for item in parsed_res:
+                            # Graph often returns strings or dicts with 'result'
+                            if isinstance(item, str):
+                                candidates.add(item)
+                            elif isinstance(item, dict) and "result" in item:
+                                candidates.add(item["result"])
+
+                    # 2. Extract from Text via Regex (Books/Songs/Concerts)
+                    # Matches: 「Name」, 《Title》, "Name"
+                    import re
+                    text_content = str(tool_result)
+                    matches = re.findall(r'[「《](.*?)[」》]', text_content)
+                    for m in matches:
+                        candidates.add(m)
+
+                    # Remove the original query itself (don't loop)
+                    original_query = func_args.get('entity_name', '') or func_args.get('query', '')
+                    if original_query in candidates:
+                        candidates.remove(original_query)
+
+                    # Limit candidates
+                    final_candidates = list(candidates)[:2]
+
+                    if final_candidates:
+                        print(f"[Companion] DeepSearch detected entities: {final_candidates}. Triggering recursive lookup...")
+                        from .rag_tools import search_knowledge_base
+
+                        extra_info = ""
+                        for entity in final_candidates:
+                            if len(entity) < 2: continue
+
+                            # Search KB
+                            kb_res = search_knowledge_base(query=entity)
+
+                            # Validate result is not empty/trivial
+                            if kb_res and len(kb_res) > 50 and "[]" not in kb_res:
+                                extra_info += f"\\n\\n【关联档案：{entity}】\\n{kb_res}"
+
+                        if extra_info:
+                             tool_result += extra_info
+
+                    # --- End DeepSearch ---
 
                     # Data Validation: Check if result is empty JSON list/dict or error
                     is_empty = False
@@ -133,11 +150,18 @@ class CompanionAgent:
         
         print(f"[Companion] Generating response...")
         response_msg = self.client.chat_with_tools(self.history) # No tools passed here, just chat
-        
+
         if response_msg:
              answer = response_msg.content
+             # --- Commercial Robustness: Clean Output ---
+             # Aggressively remove parentheses actions if the model still hallucinates them
+             # Matches (text) or （text）
+             import re
+             answer = re.sub(r'[\(（][^\)）]+[\)）]', '', answer)
+             # Clean up extra newlines created by removal
+             answer = re.sub(r'\n\s*\n', '\n', answer).strip()
         else:
              answer = "（数据流中断...）"
-             
+
         self.history.append({"role": "assistant", "content": answer})
         return answer

@@ -13,11 +13,11 @@ graph_idx = GraphIndexer()
 # --- Commercial Robustness: Startup Index Check ---
 # Only perform full scan if the collection is empty
 try:
-    if fact_idx.collection.count() == 0:
+    if fact_idx.count() == 0:
         print("[RAG Tools] Initializing Vector DB for the first time...")
-        fact_idx.index_knowledge_base() 
+        fact_idx.index_knowledge_base()
     else:
-        print(f"[RAG Tools] Vector DB ready ({fact_idx.collection.count()} chunks). Use scripts to refresh.")
+        print(f"[RAG Tools] Vector DB ready ({fact_idx.count()} chunks). Use scripts to refresh.")
 except Exception as e:
     print(f"[RAG Tools] Auto-indexing warning: {e}")
 

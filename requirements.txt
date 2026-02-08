@@ -1,0 +1,13 @@
+qdrant-client
+openai
+sentence-transformers
+torch
+tqdm
+python-dotenv
+colorama
+jieba
+rank_bm25
+networkx
+numpy
+pypinyin
+chromadb

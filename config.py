@@ -16,10 +16,17 @@ PICKLE_PATH = os.path.join(BASE_DIR, 'lty_graph.pkl')
 SONG_DATA_PATH = os.path.join(BASE_DIR, 'dataset', 'song', 'lyrics.jsonl')
 PROMPT_PATH = os.path.join(BASE_DIR, 'prompt', 'SYSTEM_PROMPT_SMART')
 
-# LLM Config
-OLLAMA_URL = os.getenv("LLM_API_BASE", "http://localhost:11434/api/chat")
-MODEL_NAME = os.getenv("LLM_MODEL_NAME", "lty_v6:7b")
-API_KEY = os.getenv("LLM_API_KEY", "ollama") # Default dummy key for Ollama
+# LLM Config - Chat Stage (Conversation)
+CHAT_API_BASE = os.getenv("CHAT_API_BASE", "http://localhost:11434/v1")
+CHAT_MODEL_NAME = os.getenv("CHAT_MODEL_NAME", "lty_v6:7b")
+CHAT_API_KEY = os.getenv("CHAT_API_KEY", "ollama")
+
+# LLM Config - Info Gathering Stage (Data Generation/Search)
+# Defaulting to Dashscope/Qwen as it supports search
+GEN_API_BASE = os.getenv("GEN_API_BASE", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+GEN_MODEL_NAME = os.getenv("GEN_MODEL_NAME", "qwen-plus")
+GEN_API_KEY = os.getenv("GEN_API_KEY", "")
+
 DEBUG = os.getenv("DEBUG", "True").lower() == "true"
 
 # Graph Config

@@ -3,21 +3,34 @@
 .env
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
 
-# RAG Generated Assets
+# RAG Generated Assets & Databases
 dataset/vector_store/
 dataset/graph_store/
 *.db
 *.sqlite3
+chroma.sqlite3
 
-# Logs
+# Node.js
+node_modules/
+package-lock.json
+
+# Local Models (Large Files)
+models/
+
+# Logs & System
 *.log
+.DS_Store
 
 # IDE
 .vscode/
 .idea/
 
-# Temporary
+# Temporary / Test Scripts
 test_kb_search.py
 verify_attribution.py
-debug_search.py
+verify_rag_status.py
+debug_*.py
+scripts/regression_test.py
