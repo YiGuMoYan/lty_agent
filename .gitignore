@@ -9,9 +9,9 @@ __pycache__/
 # RAG Generated Assets & Databases
 dataset/vector_store/
 dataset/graph_store/
+dataset/emotional_memory/
 *.db
 *.sqlite3
-chroma.sqlite3
 
 # Node.js
 node_modules/
@@ -23,14 +23,15 @@ models/
 # Logs & System
 *.log
 .DS_Store
+nul
 
 # IDE
 .vscode/
 .idea/
 
-# Temporary / Test Scripts
-test_kb_search.py
-verify_attribution.py
-verify_rag_status.py
+# Testing & Build
+.pytest_cache/
+*.egg-info/
+
+# Temporary
 debug_*.py
-scripts/regression_test.py

@@ -1,4 +1,3 @@
-
 import json
 import re  # Added for keyword extraction
 from .indexing.lyrics_indexer import LyricsIndexer

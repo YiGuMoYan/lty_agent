@@ -91,7 +91,7 @@ class GraphIndexer:
         :return: List of related nodes/neighbors.
         """
         results = []
-        
+
         # 1. Try Exact Match on Nodes
         if self.graph.has_node(entity_name):
             # If exact match, return the node itself and its neighbors
@@ -99,76 +99,55 @@ class GraphIndexer:
             for neighbor in self.graph.neighbors(entity_name):
                 edge_data = self.graph.get_edge_data(entity_name, neighbor)
                 relation = edge_data.get("relation", "related_to")
+
+                # Filter by relation type if requested
+                if relation_type and relation != relation_type:
+                    continue
+
                 results.append({"entity": neighbor, "type": "Neighbor", "relation": relation})
             return results[:15] # Limit results
-        else:
-            # 2. Try partial keyword match (AND logic) using difflib
-            # First, find candidates
-            all_nodes = list(self.graph.nodes)
-            
-            # A. Case-insensitive substring match
-            candidates = [n for n in all_nodes if entity_name.lower() in n.lower()]
-            
-            # B. If no substring match, try Fuzzy Match (difflib)
-            if not candidates:
-                # cutoff=0.6 means 60% similarity
-                fuzzy_matches = difflib.get_close_matches(entity_name, all_nodes, n=3, cutoff=0.6)
-                if fuzzy_matches:
-                    print(f"[GraphIndexer] Fuzzy match: '{entity_name}' -> {fuzzy_matches}")
-                    candidates = fuzzy_matches
 
-            # If we found candidates (Substring or Fuzzy)
-            # If we found candidates (Substring or Fuzzy)
-            if candidates:
-                refined_results = []
-                for cand in candidates[:10]: # Limit to avoid context overflow
-                    # Get edges to find context (Category/Year)
-                    # Note: cand is just a string node ID
-                    context_edges = self.graph.out_edges(cand, data=True)
-                    rel_info = "related"
-                    category_found = "Unknown"
-                    
-                    for _, target, data in context_edges:
-                        rel = data.get('relation')
-                        rel_info = f"is_{rel}_of_{target}"
-                        if rel == "belongs_to":
-                            category_found = str(target).replace("Category:", "")
-                        
-                    refined_results.append({
-                        "result": cand, 
-                        "type": "DirectMatch", 
-                        "category": category_found,
-                        "context": rel_info
-                    })
-                return refined_results
+        # 2. Try partial keyword match (AND logic) using difflib
+        # First, find candidates
+        all_nodes = list(self.graph.nodes)
 
-        if not start_node:
-            print(f"[GraphIndexer] No node keywords found for '{entity_name}'")
-            return []
+        # A. Case-insensitive substring match
+        candidates = [n for n in all_nodes if entity_name.lower() in n.lower()]
 
-        # Get neighbors
-        # For now, just direct neighbors (successors and predecessors)
-        # In a directed graph, we might want both directions for "relatedness"
-        
-        neighbors = set(self.graph.successors(start_node)) | set(self.graph.predecessors(start_node))
-        
-        refined_results = []
-        for n in neighbors:
-            # Retrieve edge data
-            # Edge could be (start, n) or (n, start)
-            rel = "related_to"
-            if self.graph.has_edge(start_node, n):
-                rel = self.graph[start_node][n].get("relation", "related")
-            elif self.graph.has_edge(n, start_node):
-                rel = self.graph[n][start_node].get("relation", "related")
-                
-            refined_results.append({
-                "source": start_node,
-                "target": n,
-                "relation": rel
-            })
-            
-        return refined_results
+        # B. If no substring match, try Fuzzy Match (difflib)
+        if not candidates:
+            # cutoff=0.6 means 60% similarity
+            fuzzy_matches = difflib.get_close_matches(entity_name, all_nodes, n=3, cutoff=0.6)
+            if fuzzy_matches:
+                print(f"[GraphIndexer] Fuzzy match: '{entity_name}' -> {fuzzy_matches}")
+                candidates = fuzzy_matches
+
+        # If we found candidates (Substring or Fuzzy)
+        if candidates:
+            refined_results = []
+            for cand in candidates[:10]: # Limit to avoid context overflow
+                # Get edges to find context (Category/Year)
+                # Note: cand is just a string node ID
+                context_edges = self.graph.out_edges(cand, data=True)
+                rel_info = "related"
+                category_found = "Unknown"
+
+                for _, target, data in context_edges:
+                    rel = data.get('relation')
+                    rel_info = f"is_{rel}_of_{target}"
+                    if rel == "belongs_to":
+                        category_found = str(target).replace("Category:", "")
+
+                refined_results.append({
+                    "result": cand,
+                    "type": "DirectMatch",
+                    "category": category_found,
+                    "context": rel_info
+                })
+            return refined_results
+
+        # No matches found
+        return []
 
 if __name__ == "__main__":
     indexer = GraphIndexer()

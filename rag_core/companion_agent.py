@@ -1,65 +1,135 @@
-
 import json
 import os
+from typing import Optional, Dict
 from .llm_client import LLMClient
 from .rag_tools import AVAILABLE_TOOLS
 from .router import IntentRouter
-from config import PROMPT_PATH
+from .emotional_router import EmotionalRouter
+from .emotional_memory import EmotionalMemory
+from .response_style import StyleManager, ResponseStyle, parse_style_from_string
+from config import PROMPT_PATH, DEFAULT_RESPONSE_STYLE
 
 class CompanionAgent:
-    def __init__(self):
+    def __init__(self, use_emotional_mode=True, style: Optional[str] = None):
         self.client = LLMClient()
         self.router = IntentRouter()
-        self.history = []
-        
-        # 1. Load User's System Prompt
-        try:
-            with open(PROMPT_PATH, 'r', encoding='utf-8') as f:
-                base_prompt = f.read()
-        except Exception as e:
-            print(f"[CompanionAgent] Warning: Could not load prompt from {PROMPT_PATH}: {e}")
-            base_prompt = "你是洛天依。"
+        self.use_emotional_mode = use_emotional_mode
 
-        # --- Commercial Robustness: Inject Time Perception ---
+        if style:
+            try:
+                initial_style = parse_style_from_string(style)
+            except ValueError:
+                print(f"[CompanionAgent] 无效的风格: {style}, 使用默认风格")
+                initial_style = ResponseStyle.CASUAL
+        else:
+            try:
+                initial_style = parse_style_from_string(DEFAULT_RESPONSE_STYLE)
+            except ValueError:
+                initial_style = ResponseStyle.CASUAL
+
+        self.style_manager = StyleManager(default_style=initial_style)
+
+        if use_emotional_mode:
+            self.emotional_router = EmotionalRouter()
+            self.emotional_memory = EmotionalMemory()
+        else:
+            self.emotional_router = None
+            self.emotional_memory = None
+
+        self.history = []
+
+        # Load base system prompt
+        prompt_file = PROMPT_PATH
+        if use_emotional_mode:
+            emotional_prompt_path = os.path.join(os.path.dirname(PROMPT_PATH), "SYSTEM_PROMPT_EMOTIONAL")
+            if os.path.exists(emotional_prompt_path):
+                prompt_file = emotional_prompt_path
+                print("[CompanionAgent] 使用情感陪伴模式")
+
+        try:
+            with open(prompt_file, 'r', encoding='utf-8') as f:
+                self.base_system_prompt = f.read()
+        except Exception as e:
+            print(f"[CompanionAgent] Warning: Could not load prompt from {prompt_file}: {e}")
+            self.base_system_prompt = "你是洛天依。"
+
+        # Build initial system prompt and add to history
+        self.history.append({"role": "system", "content": self._build_system_prompt(None)})
+
+    def _build_system_prompt(self, emotion_state) -> str:
+        """动态构建system prompt，融合基础prompt + 关系状态 + 情感上下文"""
         from datetime import datetime
         current_date = datetime.now().strftime("%Y年%m月%d日")
-        # Prepend time context so the model knows "this year" vs "last year"
         time_context = f"【系统时间锚点：当前是 {current_date}】\n(请根据此时间判断'去年'、'今年'等相对时间词)\n\n"
 
-        self.system_prompt = time_context + base_prompt
-        self.history.append({"role": "system", "content": self.system_prompt})
+        parts = [time_context]
+
+        # 关系状态
+        if self.use_emotional_mode and self.emotional_memory:
+            summary = self.emotional_memory.get_profile_summary()
+            depth = summary["relationship_depth"]
+            parts.append(f"【当前关系状态】\n")
+            parts.append(f"互动次数: {summary['total_interactions']}\n")
+            parts.append(f"关系深度: {depth:.2f}\n")
+            parts.append(f"信任度: {summary['trust_level']:.2f}\n")
+            if summary['dominant_emotions']:
+                parts.append(f"主要情感: {', '.join([f'{emo}({count})' for emo, count in summary['dominant_emotions']])}\n")
+
+            if depth < 0.3:
+                parts.append("关系指导: 保持温柔但适度距离\n")
+            elif depth < 0.7:
+                parts.append("关系指导: 更自然亲近\n")
+            else:
+                parts.append("关系指导: 更真诚直接\n")
+            parts.append("\n")
+
+        # 情感上下文
+        if emotion_state:
+            parts.append(f"【当前情感上下文】\n")
+            parts.append(f"情感: {emotion_state.primary_emotion}(强度:{emotion_state.intensity:.2f})\n")
+            if emotion_state.triggers and emotion_state.triggers != ["日常"]:
+                parts.append(f"触发因素: {', '.join(emotion_state.triggers)}\n")
+            parts.append("\n")
+
+        parts.append(self.base_system_prompt)
+        return "".join(parts)
 
     def chat(self, user_input):
         """
-        Process user input using Explicit Routing -> Tool -> Response pipeline.
+        Process user input: Emotional Analysis -> Intent Routing -> Tool -> Response
         """
-        # 1. Route (The "Right Brain")
-        # Don't add user input to history yet, wait until we have context
-        # Pass a copy of history to avoid mutation, or just reference.
-        # Note: self.history contains system prompt, user, assistant, tool calls.
-        # We might want to filter for just user/assistant for the router context to save tokens?
-        # But for now passing raw structure is fine, Router strips last 2 turns.
-        route_result = self.router.route(user_input, history=self.history)
-        
+        # 0. 情感分析
+        emotion_state = None
+        is_pure_emotional = False
+
+        if self.use_emotional_mode and self.emotional_router:
+            try:
+                emotion_state = self.emotional_router.analyze_emotion(user_input, self.history)
+                is_pure_emotional = self.emotional_router.is_pure_emotional_query(user_input, emotion_state)
+                if is_pure_emotional:
+                    print(f"[Companion] 纯情感倾诉: {emotion_state.primary_emotion}(强度:{emotion_state.intensity:.2f})")
+            except Exception as e:
+                print(f"[Companion] 情感分析失败: {e}")
+
+        # 1. Intent Routing — 始终执行（除非纯情感倾诉）
+        route_result = None
+        if not is_pure_emotional:
+            route_result = self.router.route(user_input, history=self.history)
+
         tool_context = ""
-        
+
         if route_result and route_result.get("tool"):
             func_name = route_result["tool"]
             func_args = route_result.get("args", {})
             print(f"[Companion] Router detected intent: {func_name}({func_args})")
-            
+
             if func_name in AVAILABLE_TOOLS:
                 function_to_call = AVAILABLE_TOOLS[func_name]
                 try:
                     tool_result = function_to_call(**func_args)
-                    
-                    # --- Commercial Robustness: DeepSearch (Multi-hop) ---
-                    # If we find specific entities (e.g. "Infinite Resonance") in the result,
-                    # we must look them up immediately so the model knows what they are.
 
+                    # --- DeepSearch (Multi-hop) ---
                     candidates = set()
-
-                    # 1. Extract from JSON Result
                     parsed_res = []
                     try:
                         parsed_res = json.loads(tool_result)
@@ -68,58 +138,45 @@ class CompanionAgent:
 
                     if isinstance(parsed_res, list):
                         for item in parsed_res:
-                            # Graph often returns strings or dicts with 'result'
                             if isinstance(item, str):
                                 candidates.add(item)
                             elif isinstance(item, dict) and "result" in item:
                                 candidates.add(item["result"])
 
-                    # 2. Extract from Text via Regex (Books/Songs/Concerts)
-                    # Matches: 「Name」, 《Title》, "Name"
                     import re
                     text_content = str(tool_result)
                     matches = re.findall(r'[「《](.*?)[」》]', text_content)
                     for m in matches:
                         candidates.add(m)
 
-                    # Remove the original query itself (don't loop)
                     original_query = func_args.get('entity_name', '') or func_args.get('query', '')
                     if original_query in candidates:
                         candidates.remove(original_query)
 
-                    # Limit candidates
                     final_candidates = list(candidates)[:2]
 
                     if final_candidates:
                         print(f"[Companion] DeepSearch detected entities: {final_candidates}. Triggering recursive lookup...")
                         from .rag_tools import search_knowledge_base
-
                         extra_info = ""
                         for entity in final_candidates:
                             if len(entity) < 2: continue
-
-                            # Search KB
                             kb_res = search_knowledge_base(query=entity)
-
-                            # Validate result is not empty/trivial
                             if kb_res and len(kb_res) > 50 and "[]" not in kb_res:
                                 extra_info += f"\\n\\n【关联档案：{entity}】\\n{kb_res}"
-
                         if extra_info:
                              tool_result += extra_info
-
                     # --- End DeepSearch ---
 
-                    # Data Validation: Check if result is empty JSON list/dict or error
+                    # Data Validation
                     is_empty = False
-                    if not parsed_res and not isinstance(parsed_res, list): # Empty list is falsey
+                    if not parsed_res and not isinstance(parsed_res, list):
                          if isinstance(parsed_res, dict) and "status" in parsed_res and parsed_res["status"] == "not_found":
-                             is_empty = True
+                              is_empty = True
                          elif len(parsed_res) == 0:
-                             is_empty = True
-                    
+                              is_empty = True
+
                     if is_empty:
-                        # Try one last Hail Mary: Keyword Search in KB if Graph failed completely
                         if func_name == "query_knowledge_graph":
                              print(f"[Companion] Graph failed completely. Last resort: KB Search.")
                              from .rag_tools import search_knowledge_base
@@ -132,36 +189,68 @@ class CompanionAgent:
                              tool_context = f"\n\n【共鸣雷达反馈】\n结果: 未找到任何相关数据。\n[系统指令] 严禁编造。"
                     else:
                         tool_context = f"\n\n【共鸣雷达数据】\n工具调用: {func_name}\n检索结果: {tool_result}\n(请根据以上真实数据回答用户。)"
-                        
+
                 except Exception as e:
                     tool_context = f"\n\n【共鸣雷达报错】{str(e)}"
             else:
                  print(f"[Companion] Constructing response with tool result...")
-        
-        # 2. Chat (The "Left Brain")
-        # Construct the actual message sent to the Persona Model
-        # We inject the tool result simply as part of the user message or a system injection
-        
+
+        # 2. 动态构建system prompt（含情感上下文）
+        if self.use_emotional_mode and emotion_state:
+            self.history[0] = {"role": "system", "content": self._build_system_prompt(emotion_state)}
+
+        # 3. 构建user message: 原始输入 + 工具结果（不注入情感分析）
         full_user_msg = user_input
         if tool_context:
             full_user_msg += tool_context
-            
+
+        # history只存原始user_input
         self.history.append({"role": "user", "content": full_user_msg})
-        
+
         print(f"[Companion] Generating response...")
-        response_msg = self.client.chat_with_tools(self.history) # No tools passed here, just chat
+        response_msg = self.client.chat_with_tools(self.history)
 
+        base_answer = ""
         if response_msg:
-             answer = response_msg.content
-             # --- Commercial Robustness: Clean Output ---
-             # Aggressively remove parentheses actions if the model still hallucinates them
-             # Matches (text) or （text）
-             import re
-             answer = re.sub(r'[\(（][^\)）]+[\)）]', '', answer)
-             # Clean up extra newlines created by removal
-             answer = re.sub(r'\n\s*\n', '\n', answer).strip()
+             answer_content = response_msg.content
+             if answer_content is not None:
+                 import re
+                 base_answer = re.sub(r'[\(（][^\)）]+[\)）]', '', answer_content)
+                 base_answer = re.sub(r'\n\s*\n', '\n', base_answer).strip()
+             else:
+                 base_answer = "（数据流中断...）"
         else:
-             answer = "（数据流中断...）"
+             base_answer = "（数据流中断...）"
 
-        self.history.append({"role": "assistant", "content": answer})
-        return answer
+        final_answer = base_answer
+
+        # 4. 存储情感记忆
+        if self.use_emotional_mode and emotion_state and self.emotional_memory:
+            try:
+                self.emotional_memory.store_emotional_context(
+                    emotion_state=emotion_state,
+                    user_input=user_input,
+                    ai_response=final_answer,
+                )
+                print(f"[Companion] 已保存情感记忆")
+            except Exception as e:
+                print(f"[Companion] 保存情感记忆失败: {e}")
+
+        self.history.append({"role": "assistant", "content": final_answer})
+        return final_answer
+
+    def set_style(self, style: str) -> bool:
+        try:
+            parsed_style = parse_style_from_string(style)
+            self.style_manager.set_style(parsed_style)
+            print(f"[CompanionAgent] 风格已切换为: {parsed_style.value}")
+            return True
+        except ValueError as e:
+            print(f"[CompanionAgent] 风格切换失败: {e}")
+            return False
+
+    def get_current_style(self) -> ResponseStyle:
+        return self.style_manager.get_current_style()
+
+    def get_available_styles(self) -> Dict[str, str]:
+        return self.style_manager.get_available_styles()

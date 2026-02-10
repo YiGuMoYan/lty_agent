@@ -1,8 +1,9 @@
 import os
-import sys
 from typing import List, Union
 from openai import OpenAI
 import numpy as np
+
+import config
 
 # Type definitions to replace chromadb.api.types
 Documents = List[str]
@@ -14,10 +15,6 @@ class EmbeddingFunction:
     """
     def __call__(self, input: Documents) -> Embeddings:
         raise NotImplementedError
-
-# Hack to import config from root
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import config
 
 class DashScopeEmbeddingFunction(EmbeddingFunction):
     """
