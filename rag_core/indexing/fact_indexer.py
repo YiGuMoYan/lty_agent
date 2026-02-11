@@ -2,6 +2,7 @@ import os
 import re
 import uuid
 import json
+import config
 from tqdm import tqdm
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
@@ -23,14 +24,10 @@ class FactIndexer:
         self.client = QdrantClient(path=persist_directory)
         self.collection_name = "lty_facts"
 
-        # Determine vector dimension dynamically
-        from rag_core.embeddings import get_embedding_function, LocalBGEEmbeddingFunction
+        # Determine vector dimension from config
+        from rag_core.embeddings import get_embedding_function
         self.embedding_fn = get_embedding_function()
-
-        if isinstance(self.embedding_fn, LocalBGEEmbeddingFunction):
-            self.vector_dim = 1024
-        else:
-            self.vector_dim = 1536 # DashScope defaults
+        self.vector_dim = config.EMBEDDING_DIM
 
         # Create collection if not exists
         if not self.client.collection_exists(self.collection_name):

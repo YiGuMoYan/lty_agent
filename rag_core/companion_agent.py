@@ -10,6 +10,18 @@ from .response_style import StyleManager, ResponseStyle, parse_style_from_string
 from config import PROMPT_PATH, DEFAULT_RESPONSE_STYLE
 
 class CompanionAgent:
+    # 用户情感 → 回复语气指令映射（天依应该用什么语气回应）
+    EMOTION_INSTRUCT_MAP = {
+        "开心": "用开心的语气说这句话",
+        "难过": "用温柔安慰的语气说这句话",
+        "焦虑": "用轻柔舒缓的语气说这句话",
+        "孤独": "用温暖陪伴的语气说这句话",
+        "愤怒": "用冷静温和的语气说这句话",
+        "疲惫": "用轻柔关心的语气说这句话",
+        "困惑": "用耐心温和的语气说这句话",
+        "平静": "用平静温柔的语气说这句话",
+    }
+
     def __init__(self, use_emotional_mode=True, style: Optional[str] = None):
         self.client = LLMClient()
         self.router = IntentRouter()
@@ -208,7 +220,11 @@ class CompanionAgent:
         self.history.append({"role": "user", "content": full_user_msg})
 
         print(f"[Companion] Generating response...")
+        import time as _time
+        _llm_start = _time.perf_counter()
         response_msg = self.client.chat_with_tools(self.history)
+        _llm_elapsed = _time.perf_counter() - _llm_start
+        print(f"[Companion] LLM 生成耗时: {_llm_elapsed:.3f}s")
 
         base_answer = ""
         if response_msg:
@@ -238,6 +254,21 @@ class CompanionAgent:
 
         self.history.append({"role": "assistant", "content": final_answer})
         return final_answer
+
+    def chat_with_emotion(self, user_input):
+        """返回 (回复文本, 语气指令)，语气基于情感分析自动生成"""
+        # 先做情感分析拿到 emotion_state
+        emotion = "平静"
+        if self.use_emotional_mode and self.emotional_router:
+            try:
+                emotion_state = self.emotional_router.analyze_emotion(user_input, self.history)
+                emotion = emotion_state.primary_emotion
+            except Exception:
+                pass
+
+        text = self.chat(user_input)
+        instruct = self.EMOTION_INSTRUCT_MAP.get(emotion, self.EMOTION_INSTRUCT_MAP["平静"])
+        return text, instruct
 
     def set_style(self, style: str) -> bool:
         try:

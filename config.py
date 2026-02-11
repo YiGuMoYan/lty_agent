@@ -26,5 +26,12 @@ GEN_API_BASE = os.getenv("GEN_API_BASE", "https://dashscope.aliyuncs.com/compati
 GEN_MODEL_NAME = os.getenv("GEN_MODEL_NAME", "qwen-plus")
 GEN_API_KEY = os.getenv("GEN_API_KEY", "")
 
+# Embedding Config
+# EMBEDDING_BACKEND: "local" = local BGE-M3, "cloud" = Dashscope cloud API
+EMBEDDING_BACKEND = os.getenv("EMBEDDING_BACKEND", "cloud").lower()
+EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", "text-embedding-v3")
+EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1024"))
+EMBEDDING_LOCAL_PATH = os.getenv("EMBEDDING_LOCAL_PATH", os.path.join(BASE_DIR, "models", "Xorbits", "bge-m3"))
+
 DEBUG = os.getenv("DEBUG", "True").lower() == "true"
 

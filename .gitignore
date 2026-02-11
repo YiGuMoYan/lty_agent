@@ -29,6 +29,9 @@ nul
 .vscode/
 .idea/
 
+# Claude Code
+.claude/
+
 # Testing & Build
 .pytest_cache/
 *.egg-info/
