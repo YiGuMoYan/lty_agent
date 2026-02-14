@@ -24,7 +24,7 @@ class CompanionAgent:
         "平静": "用平静温柔的语气说这句话",
     }
 
-    MAX_HISTORY_TURNS = 20
+    MAX_HISTORY_TURNS = 30 # Increased for rolling summary buffer
 
     def __init__(self, use_emotional_mode=True, style: Optional[str] = None, use_unified_generator=True):
         self.client = LLMClient()
@@ -106,6 +106,15 @@ class CompanionAgent:
                 parts.append("关系指导: 更真诚直接\n")
             parts.append("\n")
 
+            # 滚动总结 (Long-term Memory)
+            conv_summary = self.emotional_memory.profile.conversation_summary
+            if conv_summary:
+                # Limit to last 1000 chars or last 5 entries approx
+                display_summary = conv_summary[-1000:]
+                if len(conv_summary) > 1000:
+                    display_summary = "..." + display_summary
+                parts.append(f"【长期记忆 (过往对话摘要)】\n{display_summary}\n\n")
+
         # 情感上下文
         if emotion_state:
             parts.append(f"【当前情感上下文】\n")
@@ -117,8 +126,73 @@ class CompanionAgent:
         parts.append(self.base_system_prompt)
         return "".join(parts)
 
+    def _summarize_history(self):
+        """滚动总结历史对话"""
+        if len(self.history) <= 25:
+            return
+
+        # Check if we can summarize (needs emotional memory)
+        if not (self.use_emotional_mode and self.emotional_memory):
+            return
+
+        print("[Companion] 触发滚动总结...")
+        # Slice self.history[1:11] (skip system prompt, take 10 turns)
+        turns_to_summarize = self.history[1:11]
+
+        # Extract timestamp from first message if possible, else use current
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+        # Prepare text
+        conversation_text = ""
+        for turn in turns_to_summarize:
+            role = "用户" if turn['role'] == "user" else "天依"
+            content = turn['content']
+            # Remove tool outputs for summary clarity if needed, but keeping simple for now
+            conversation_text += f"{role}: {content}\n"
+
+        prompt = f"""请简要总结以下对话片段，作为长期记忆保存。
+侧重于用户提到的关键信息、偏好、经历以及天依的情感互动。
+不要流水账，要提炼核心内容。
+格式要求：[YYYY-MM-DD HH:MM] 总结内容
+
+对话内容：
+{conversation_text}"""
+
+        try:
+            # Call LLM
+            # We use a temporary simple history for this call
+            summary_msgs = [{"role": "user", "content": prompt}]
+            summary_response = self.client.chat_with_tools(summary_msgs)
+
+            if summary_response and summary_response.content:
+                summary_text = summary_response.content.strip()
+                # Ensure timestamp format if LLM missed it
+                if not summary_text.startswith("["):
+                     summary_text = f"[{timestamp}] {summary_text}"
+
+                # Update profile
+                current_summary = self.emotional_memory.profile.conversation_summary
+                if current_summary:
+                    self.emotional_memory.profile.conversation_summary = current_summary + "\n" + summary_text
+                else:
+                    self.emotional_memory.profile.conversation_summary = summary_text
+
+                self.emotional_memory._save_profile()
+                print(f"[Companion] 已生成滚动总结: {summary_text[:50]}...")
+
+                # Remove these 10 turns from history
+                # Keep system prompt (0) and append the rest (11:)
+                self.history = [self.history[0]] + self.history[11:]
+
+        except Exception as e:
+            print(f"[Companion] 滚动总结失败: {e}")
+
     def _trim_history(self):
         """管理上下文窗口，避免历史记录无限增长"""
+        # Try summarizing first
+        self._summarize_history()
+
         if len(self.history) > 1:
             # 始终保留 system prompt (index 0)
             system_prompt = self.history[0]

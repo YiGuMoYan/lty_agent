@@ -62,6 +62,7 @@ class UserEmotionalProfile:
     trust_level: float  # 信任度 0.0-1.0
     last_interaction: str
     emotional_patterns: Dict[str, Any]  # 情感模式
+    conversation_summary: str = ""  # 对话滚动总结
 
     def to_dict(self) -> Dict:
         return asdict(self)
@@ -132,6 +133,14 @@ class EmotionalMemory:
                 ''')
                 # Index for faster history retrieval
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_memories_user_timestamp ON emotional_memories(user_id, timestamp)')
+
+                # Migration: Check for conversation_summary column
+                try:
+                    cursor.execute("SELECT conversation_summary FROM user_profiles LIMIT 1")
+                except sqlite3.OperationalError:
+                    print("[EmotionalMemory] Adding conversation_summary column to user_profiles")
+                    cursor.execute("ALTER TABLE user_profiles ADD COLUMN conversation_summary TEXT DEFAULT ''")
+
                 conn.commit()
         except Exception as e:
             print(f"[EmotionalMemory] Database initialization failed: {e}")
@@ -218,8 +227,12 @@ class EmotionalMemory:
                 row = cursor.fetchone()
 
                 if row:
-                    # Row matches columns order in CREATE TABLE
-                    # 0: user_id, 1: total, 2: dist, 3: avg_int, 4: triggers, 5: depth, 6: trust, 7: last, 8: patterns
+                    # Row matches columns order in CREATE TABLE + ALTER TABLE
+                    # 0: user_id, 1: total, 2: dist, 3: avg_int, 4: triggers, 5: depth, 6: trust, 7: last, 8: patterns, 9: summary
+                    summary = ""
+                    if len(row) > 9:
+                         summary = row[9] if row[9] else ""
+
                     return UserEmotionalProfile(
                         user_id=row[0],
                         total_interactions=row[1],
@@ -229,7 +242,8 @@ class EmotionalMemory:
                         relationship_depth=row[5],
                         trust_level=row[6],
                         last_interaction=row[7] if row[7] else "",
-                        emotional_patterns=json.loads(row[8]) if row[8] else {}
+                        emotional_patterns=json.loads(row[8]) if row[8] else {},
+                        conversation_summary=summary
                     )
         except Exception as e:
             print(f"[EmotionalMemory] 加载用户画像失败: {e}")
@@ -244,7 +258,8 @@ class EmotionalMemory:
             relationship_depth=0.0,
             trust_level=0.0,
             last_interaction="",
-            emotional_patterns={}
+            emotional_patterns={},
+            conversation_summary=""
         )
 
     def _save_profile(self):
@@ -255,8 +270,8 @@ class EmotionalMemory:
                 cursor.execute('''
                     INSERT OR REPLACE INTO user_profiles
                     (user_id, total_interactions, emotion_distribution, average_intensity,
-                     common_triggers, relationship_depth, trust_level, last_interaction, emotional_patterns)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     common_triggers, relationship_depth, trust_level, last_interaction, emotional_patterns, conversation_summary)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     self.profile.user_id,
                     self.profile.total_interactions,
@@ -266,7 +281,8 @@ class EmotionalMemory:
                     self.profile.relationship_depth,
                     self.profile.trust_level,
                     self.profile.last_interaction,
-                    json.dumps(self.profile.emotional_patterns, ensure_ascii=False)
+                    json.dumps(self.profile.emotional_patterns, ensure_ascii=False),
+                    self.profile.conversation_summary
                 ))
                 conn.commit()
         except Exception as e:
