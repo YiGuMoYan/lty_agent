@@ -23,10 +23,7 @@ except ImportError:
     HAS_PYAUDIO = False
 
 from rag_core.companion_agent import CompanionAgent
-
-
-# CosyVoice 服务地址
-TTS_SERVER = os.getenv("TTS_SERVER", "http://172.22.11.92:9880")
+from config import TTS_SERVER
 
 # 音频参数
 CHANNELS = 1
@@ -114,10 +111,20 @@ def play_stream(resp, sample_rate):
 
     try:
         while True:
-            data = buf.get()
+            try:
+                # Add timeout to prevent infinite blocking
+                data = buf.get(timeout=5.0)
+            except queue.Empty:
+                print("  [播放缓冲超时]")
+                break
+
             if data is sentinel:
                 break
-            stream.write(data)
+            try:
+                stream.write(data)
+            except Exception as e:
+                print(f"  [音频写入错误: {e}]")
+                break
     finally:
         stream.stop_stream()
         stream.close()

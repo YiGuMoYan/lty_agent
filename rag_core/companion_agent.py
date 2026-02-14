@@ -24,6 +24,8 @@ class CompanionAgent:
         "平静": "用平静温柔的语气说这句话",
     }
 
+    MAX_HISTORY_TURNS = 20
+
     def __init__(self, use_emotional_mode=True, style: Optional[str] = None, use_unified_generator=True):
         self.client = LLMClient()
         self.router = IntentRouter()
@@ -115,9 +117,21 @@ class CompanionAgent:
         parts.append(self.base_system_prompt)
         return "".join(parts)
 
-    def chat(self, user_input):
+    def _trim_history(self):
+        """管理上下文窗口，避免历史记录无限增长"""
+        if len(self.history) > 1:
+            # 始终保留 system prompt (index 0)
+            system_prompt = self.history[0]
+            remaining = self.history[1:]
+
+            # 保留最近 N 轮
+            if len(remaining) > self.MAX_HISTORY_TURNS:
+                 self.history = [system_prompt] + remaining[-self.MAX_HISTORY_TURNS:]
+
+    def _execute_rag_pipeline(self, user_input):
         """
-        Process user input: Emotional Analysis -> Intent Routing -> Tool -> Response
+        执行核心 RAG 流程：情感分析 -> 意图路由 -> 工具执行 (含 DeepSearch) -> 返回上下文
+        Returns: (tool_context, emotion_state, is_pure_emotional)
         """
         # 0. 情感分析
         emotion_state = None
@@ -216,16 +230,28 @@ class CompanionAgent:
             else:
                  print(f"[Companion] Constructing response with tool result...")
 
+        return tool_context, emotion_state, is_pure_emotional
+
+    def chat(self, user_input):
+        """
+        Process user input: Emotional Analysis -> Intent Routing -> Tool -> Response
+        """
+        # 1. Execute RAG Pipeline
+        tool_context, emotion_state, is_pure_emotional = self._execute_rag_pipeline(user_input)
+
         # 2. 动态构建system prompt（含情感上下文）
         if self.use_emotional_mode and emotion_state:
             self.history[0] = {"role": "system", "content": self._build_system_prompt(emotion_state)}
 
-        # 3. 构建user message: 原始输入 + 工具结果（不注入情感分析）
+        # 3. 构建user message: 原始输入 + 工具结果
         full_user_msg = user_input
         if tool_context:
             full_user_msg += tool_context
 
-        # history只存原始user_input
+        # history只存原始user_input (Wait, logic changed to store full_user_msg in previous thought)
+        # Original code said: # history只存原始user_input
+        # But code was: self.history.append({"role": "user", "content": full_user_msg})
+        # So it stored full_user_msg.
         self.history.append({"role": "user", "content": full_user_msg})
 
         print(f"[Companion] Generating response...")
@@ -262,6 +288,10 @@ class CompanionAgent:
                 print(f"[Companion] 保存情感记忆失败: {e}")
 
         self.history.append({"role": "assistant", "content": final_answer})
+
+        # 5. 上下文截断
+        self._trim_history()
+
         return final_answer
 
     def chat_with_emotion(self, user_input):
@@ -306,48 +336,18 @@ class CompanionAgent:
         from .emotional_router import EmotionState
         import time as _time
 
-        # 1. 情感分析
-        emotion = "平静"
-        emotion_state = EmotionState(
-            primary_emotion="平静", intensity=0.3, confidence=0.5,
-            context=user_input, triggers=["日常"], timestamp=""
-        )
-        if self.use_emotional_mode and self.emotional_router:
-            try:
-                emotion_state = self.emotional_router.analyze_emotion(user_input, self.history)
-                emotion = emotion_state.primary_emotion
-            except Exception:
-                pass
+        # 1. Execute RAG Pipeline
+        tool_context, emotion_state, is_pure_emotional = self._execute_rag_pipeline(user_input)
 
-        # 2. Intent Routing（工具调用）
-        is_pure_emotional = False
-        if self.use_emotional_mode and self.emotional_router:
-            is_pure_emotional = self.emotional_router.is_pure_emotional_query(user_input, emotion_state)
+        # Ensure emotion_state exists for fallback/generation
+        if not emotion_state:
+            emotion_state = EmotionState(
+                primary_emotion="平静", intensity=0.3, confidence=0.5,
+                context=user_input, triggers=["日常"], timestamp=""
+            )
+        emotion = emotion_state.primary_emotion
 
-        route_result = None
-        tool_context = ""
-
-        if not is_pure_emotional:
-            route_result = self.router.route(user_input, history=self.history)
-
-            if route_result and route_result.get("tool"):
-                func_name = route_result["tool"]
-                func_args = route_result.get("args", {})
-                print(f"[Companion] Router detected: {func_name}({func_args})")
-
-                if func_name in AVAILABLE_TOOLS:
-                    function_to_call = AVAILABLE_TOOLS[func_name]
-                    try:
-                        tool_result = function_to_call(**func_args)
-
-                        # DeepSearch逻辑（省略详细代码，与原chat方法相同）
-                        # ...
-
-                        tool_context = f"\n\n【共鸣雷达数据】\n工具: {func_name}\n结果: {tool_result}\n(请根据真实数据回答)"
-                    except Exception as e:
-                        tool_context = f"\n\n【共鸣雷达报错】{str(e)}"
-
-        # 3. 动态更新system prompt
+        # 2. 动态更新system prompt
         if self.use_emotional_mode and emotion_state:
             self.history[0] = {"role": "system", "content": self._build_system_prompt(emotion_state)}
             # 同步更新unified_generator的system prompt
@@ -355,12 +355,12 @@ class CompanionAgent:
                 from .unified_generator import LIVE2D_INSTRUCTION
                 self.unified_generator.enhanced_system_prompt = self._build_system_prompt(emotion_state) + LIVE2D_INSTRUCTION
 
-        # 4. 构建完整user message
+        # 3. 构建完整user message
         full_user_msg = user_input
         if tool_context:
             full_user_msg += tool_context
 
-        # 5. 使用统一生成器（一次LLM调用）
+        # 4. 使用统一生成器（一次LLM调用）
         _start = _time.perf_counter()
 
         # 构建messages（不含system，由unified_generator添加）
@@ -375,30 +375,37 @@ class CompanionAgent:
         _elapsed = _time.perf_counter() - _start
         print(f"[Companion] 统一生成总耗时: {_elapsed:.3f}s")
 
-        # 6. 处理结果
+        # 5. 处理结果
         if unified_result:
             text = unified_result["text"]
             live2d_data = unified_result["live2d"]
+
+            # 6. 更新历史
+            self.history.append({"role": "user", "content": full_user_msg})
+            self.history.append({"role": "assistant", "content": text})
+
+            # 7. 保存情感记忆
+            if self.use_emotional_mode and emotion_state and self.emotional_memory:
+                try:
+                    self.emotional_memory.store_emotional_context(
+                        emotion_state=emotion_state,
+                        user_input=user_input,
+                        ai_response=text
+                    )
+                except Exception as e:
+                    print(f"[Companion] 保存情感记忆失败: {e}")
+
         else:
             # Fallback: 分离生成
             print("[Companion] ⚠️ 统一生成失败，回退到分离模式")
+            # Note: This will trigger RAG pipeline again in chat()
             text = self.chat(user_input)
             live2d_data = self.generate_live2d_params(text, emotion, emotion_state.intensity)
 
-        # 7. 更新历史
-        self.history.append({"role": "user", "content": user_input})
-        self.history.append({"role": "assistant", "content": text})
+            # History and memory are handled inside self.chat()
 
-        # 8. 保存情感记忆
-        if self.use_emotional_mode and emotion_state and self.emotional_memory:
-            try:
-                self.emotional_memory.store_emotional_context(
-                    emotion_state=emotion_state,
-                    user_input=user_input,
-                    ai_response=text
-                )
-            except Exception as e:
-                print(f"[Companion] 保存情感记忆失败: {e}")
+        # 8. Trim History
+        self._trim_history()
 
         instruct = self.EMOTION_INSTRUCT_MAP.get(emotion, self.EMOTION_INSTRUCT_MAP["平静"])
         return text, instruct, emotion_state, live2d_data
