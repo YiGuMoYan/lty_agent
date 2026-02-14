@@ -6,7 +6,13 @@
       "Bash(dir:*)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(del \"C:\\\\Users\\\\YiGuMoYan\\\\OneDrive\\\\Desktop\\\\project\\\\rag_lty\\\\main_new.py\")",
+      "Bash(del:*)",
+      "Bash(del \"C:\\\\Users\\\\YiGuMoYan\\\\OneDrive\\\\Desktop\\\\project\\\\rag_lty\\\\EMOTIONAL_GUIDE_COMPLETE.md\")",
+      "Bash(test:*)",
+      "Bash(git reset:*)",
+      "Bash(findstr:*)"
     ]
   }
 }

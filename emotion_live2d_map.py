@@ -1,0 +1,147 @@
+"""
+情绪 → Live2D 参数映射
+将 EmotionState 的 primary_emotion + intensity 转换为 Live2D 模型参数字典
+"""
+
+# 中性基线参数（所有情绪的起点）
+NEUTRAL_PARAMS = {
+    "ParamAngleX": 0,
+    "ParamAngleY": 0,
+    "ParamAngleZ": 0,
+    "ParamEyeLOpen": 1,
+    "ParamEyeROpen": 1,
+    "ParamEyeLSmile": 0,
+    "ParamEyeRSmile": 0,
+    "ParamEyeBallX": 0,
+    "ParamEyeBallY": 0,
+    "ParamBrowLY": 0,
+    "ParamBrowRY": 0,
+    "ParamBrowLAngle": 0,
+    "ParamBrowRAngle": 0,
+    "ParamMouthForm": 0,
+    "ParamMouthOpenY": 0,
+    "ParamCheek": 0,
+    "ParamBodyAngleX": 0,
+    "ParamBodyAngleY": 0,
+    "ParamBodyAngleZ": 0,
+    "ParamBreath": 0,
+}
+
+# 每种情绪在 intensity=1.0 时的目标参数（只列出与中性不同的）
+# 眼球始终看前方（不设置 EyeBallX/Y），表情幅度加大
+EMOTION_PARAMS = {
+    "开心": {
+        "ParamEyeLSmile": 1.0,
+        "ParamEyeRSmile": 1.0,
+        "ParamMouthForm": 1.0,
+        "ParamMouthOpenY": 0.5,
+        "ParamCheek": 1.0,
+        "ParamAngleZ": 10,
+        "ParamBrowLY": 0.6,
+        "ParamBrowRY": 0.6,
+        "ParamBodyAngleZ": 4,
+    },
+    "难过": {
+        "ParamEyeLOpen": 0.35,
+        "ParamEyeROpen": 0.35,
+        "ParamEyeLSmile": 0,
+        "ParamEyeRSmile": 0,
+        "ParamMouthForm": -1.0,
+        "ParamBrowLY": -0.8,
+        "ParamBrowRY": -0.8,
+        "ParamBrowLAngle": -0.6,
+        "ParamBrowRAngle": -0.6,
+        "ParamAngleY": -15,
+        "ParamAngleX": -5,
+        "ParamBodyAngleY": -4,
+    },
+    "焦虑": {
+        "ParamEyeLOpen": 1,
+        "ParamEyeROpen": 1,
+        "ParamBrowLY": 0.8,
+        "ParamBrowRY": 0.8,
+        "ParamBrowLAngle": 0.7,
+        "ParamBrowRAngle": 0.7,
+        "ParamMouthForm": -0.3,
+        "ParamBodyAngleX": 4,
+        "ParamAngleX": 5,
+    },
+    "孤独": {
+        "ParamEyeLOpen": 0.45,
+        "ParamEyeROpen": 0.45,
+        "ParamAngleZ": -12,
+        "ParamAngleY": -10,
+        "ParamBrowLY": -0.4,
+        "ParamBrowRY": -0.4,
+        "ParamMouthForm": -0.4,
+        "ParamBodyAngleZ": -3,
+    },
+    "愤怒": {
+        "ParamBrowLY": -1.0,
+        "ParamBrowRY": -1.0,
+        "ParamBrowLAngle": -1.0,
+        "ParamBrowRAngle": -1.0,
+        "ParamEyeLOpen": 1.0,
+        "ParamEyeROpen": 1.0,
+        "ParamMouthForm": -0.8,
+        "ParamAngleY": 6,
+        "ParamAngleX": -3,
+        "ParamBodyAngleX": -3,
+    },
+    "疲惫": {
+        "ParamEyeLOpen": 0.25,
+        "ParamEyeROpen": 0.25,
+        "ParamBrowLY": -0.5,
+        "ParamBrowRY": -0.5,
+        "ParamAngleY": -18,
+        "ParamBreath": 0.8,
+        "ParamMouthForm": -0.2,
+        "ParamBodyAngleY": -3,
+    },
+    "困惑": {
+        "ParamBrowLY": 0.8,
+        "ParamBrowRY": -0.5,
+        "ParamBrowLAngle": 0.7,
+        "ParamBrowRAngle": -0.4,
+        "ParamAngleZ": -15,
+        "ParamEyeLOpen": 1.0,
+        "ParamEyeROpen": 0.6,
+        "ParamMouthForm": -0.3,
+        "ParamBodyAngleZ": -2,
+    },
+    "平静": {
+        "ParamBreath": 0.5,
+        "ParamEyeLSmile": 0.15,
+        "ParamEyeRSmile": 0.15,
+        "ParamMouthForm": 0.1,
+    },
+}
+
+# 高强度时可触发的姿势参数 {emotion: (param_id, threshold)}
+EMOTION_POSES = {
+    "开心": ("ParamPOSE2", 0.75),  # 打招呼
+}
+
+
+def get_live2d_params(emotion: str, intensity: float) -> dict:
+    """
+    根据情绪和强度计算 Live2D 参数。
+    返回 {"params": {参数字典}, "pose": 姿势ID或None}
+    """
+    intensity = max(0.0, min(1.0, intensity))
+    target = EMOTION_PARAMS.get(emotion, EMOTION_PARAMS["平静"])
+
+    # 从中性基线向目标插值
+    params = {}
+    for key, neutral_val in NEUTRAL_PARAMS.items():
+        target_val = target.get(key, neutral_val)
+        params[key] = neutral_val + (target_val - neutral_val) * intensity
+
+    # 检查是否触发姿势
+    pose = None
+    if emotion in EMOTION_POSES:
+        pose_id, threshold = EMOTION_POSES[emotion]
+        if intensity >= threshold:
+            pose = pose_id
+
+    return {"params": params, "pose": pose}

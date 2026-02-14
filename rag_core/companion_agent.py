@@ -6,6 +6,8 @@ from .rag_tools import AVAILABLE_TOOLS
 from .router import IntentRouter
 from .emotional_router import EmotionalRouter
 from .emotional_memory import EmotionalMemory
+from .live2d_generator import Live2DParamGenerator
+from .unified_generator import UnifiedResponseGenerator
 from .response_style import StyleManager, ResponseStyle, parse_style_from_string
 from config import PROMPT_PATH, DEFAULT_RESPONSE_STYLE
 
@@ -22,10 +24,12 @@ class CompanionAgent:
         "平静": "用平静温柔的语气说这句话",
     }
 
-    def __init__(self, use_emotional_mode=True, style: Optional[str] = None):
+    def __init__(self, use_emotional_mode=True, style: Optional[str] = None, use_unified_generator=True):
         self.client = LLMClient()
         self.router = IntentRouter()
+        self.live2d_generator = Live2DParamGenerator()
         self.use_emotional_mode = use_emotional_mode
+        self.use_unified_generator = use_unified_generator  # 是否使用统一生成器
 
         if style:
             try:
@@ -67,6 +71,11 @@ class CompanionAgent:
 
         # Build initial system prompt and add to history
         self.history.append({"role": "system", "content": self._build_system_prompt(None)})
+
+        # 初始化统一生成器（如果启用）
+        if self.use_unified_generator:
+            self.unified_generator = UnifiedResponseGenerator(self.base_system_prompt)
+            print("[CompanionAgent] 启用统一生成模式（对话+Live2D一次生成）")
 
     def _build_system_prompt(self, emotion_state) -> str:
         """动态构建system prompt，融合基础prompt + 关系状态 + 情感上下文"""
@@ -270,6 +279,130 @@ class CompanionAgent:
         instruct = self.EMOTION_INSTRUCT_MAP.get(emotion, self.EMOTION_INSTRUCT_MAP["平静"])
         return text, instruct
 
+    def chat_with_emotion_state(self, user_input):
+        """返回 (回复文本, 语气指令, EmotionState)，供 WebSocket 服务使用"""
+        from .emotional_router import EmotionState
+        emotion = "平静"
+        emotion_state = EmotionState(
+            primary_emotion="平静", intensity=0.3, confidence=0.5,
+            context=user_input, triggers=["日常"], timestamp=""
+        )
+        if self.use_emotional_mode and self.emotional_router:
+            try:
+                emotion_state = self.emotional_router.analyze_emotion(user_input, self.history)
+                emotion = emotion_state.primary_emotion
+            except Exception:
+                pass
+
+        text = self.chat(user_input)
+        instruct = self.EMOTION_INSTRUCT_MAP.get(emotion, self.EMOTION_INSTRUCT_MAP["平静"])
+        return text, instruct, emotion_state
+
+    def chat_with_live2d_unified(self, user_input):
+        """
+        统一生成模式：一次LLM调用同时生成对话和Live2D参数
+        返回: (回复文本, 语气指令, EmotionState, live2d_data)
+        """
+        from .emotional_router import EmotionState
+        import time as _time
+
+        # 1. 情感分析
+        emotion = "平静"
+        emotion_state = EmotionState(
+            primary_emotion="平静", intensity=0.3, confidence=0.5,
+            context=user_input, triggers=["日常"], timestamp=""
+        )
+        if self.use_emotional_mode and self.emotional_router:
+            try:
+                emotion_state = self.emotional_router.analyze_emotion(user_input, self.history)
+                emotion = emotion_state.primary_emotion
+            except Exception:
+                pass
+
+        # 2. Intent Routing（工具调用）
+        is_pure_emotional = False
+        if self.use_emotional_mode and self.emotional_router:
+            is_pure_emotional = self.emotional_router.is_pure_emotional_query(user_input, emotion_state)
+
+        route_result = None
+        tool_context = ""
+
+        if not is_pure_emotional:
+            route_result = self.router.route(user_input, history=self.history)
+
+            if route_result and route_result.get("tool"):
+                func_name = route_result["tool"]
+                func_args = route_result.get("args", {})
+                print(f"[Companion] Router detected: {func_name}({func_args})")
+
+                if func_name in AVAILABLE_TOOLS:
+                    function_to_call = AVAILABLE_TOOLS[func_name]
+                    try:
+                        tool_result = function_to_call(**func_args)
+
+                        # DeepSearch逻辑（省略详细代码，与原chat方法相同）
+                        # ...
+
+                        tool_context = f"\n\n【共鸣雷达数据】\n工具: {func_name}\n结果: {tool_result}\n(请根据真实数据回答)"
+                    except Exception as e:
+                        tool_context = f"\n\n【共鸣雷达报错】{str(e)}"
+
+        # 3. 动态更新system prompt
+        if self.use_emotional_mode and emotion_state:
+            self.history[0] = {"role": "system", "content": self._build_system_prompt(emotion_state)}
+            # 同步更新unified_generator的system prompt
+            if hasattr(self, 'unified_generator'):
+                from .unified_generator import LIVE2D_INSTRUCTION
+                self.unified_generator.enhanced_system_prompt = self._build_system_prompt(emotion_state) + LIVE2D_INSTRUCTION
+
+        # 4. 构建完整user message
+        full_user_msg = user_input
+        if tool_context:
+            full_user_msg += tool_context
+
+        # 5. 使用统一生成器（一次LLM调用）
+        _start = _time.perf_counter()
+
+        # 构建messages（不含system，由unified_generator添加）
+        messages = self.history[1:] + [{"role": "user", "content": full_user_msg}]
+
+        unified_result = self.unified_generator.generate(
+            messages=messages,
+            emotion=emotion,
+            intensity=emotion_state.intensity
+        )
+
+        _elapsed = _time.perf_counter() - _start
+        print(f"[Companion] 统一生成总耗时: {_elapsed:.3f}s")
+
+        # 6. 处理结果
+        if unified_result:
+            text = unified_result["text"]
+            live2d_data = unified_result["live2d"]
+        else:
+            # Fallback: 分离生成
+            print("[Companion] ⚠️ 统一生成失败，回退到分离模式")
+            text = self.chat(user_input)
+            live2d_data = self.generate_live2d_params(text, emotion, emotion_state.intensity)
+
+        # 7. 更新历史
+        self.history.append({"role": "user", "content": user_input})
+        self.history.append({"role": "assistant", "content": text})
+
+        # 8. 保存情感记忆
+        if self.use_emotional_mode and emotion_state and self.emotional_memory:
+            try:
+                self.emotional_memory.store_emotional_context(
+                    emotion_state=emotion_state,
+                    user_input=user_input,
+                    ai_response=text
+                )
+            except Exception as e:
+                print(f"[Companion] 保存情感记忆失败: {e}")
+
+        instruct = self.EMOTION_INSTRUCT_MAP.get(emotion, self.EMOTION_INSTRUCT_MAP["平静"])
+        return text, instruct, emotion_state, live2d_data
+
     def set_style(self, style: str) -> bool:
         try:
             parsed_style = parse_style_from_string(style)
@@ -285,3 +418,17 @@ class CompanionAgent:
 
     def get_available_styles(self) -> Dict[str, str]:
         return self.style_manager.get_available_styles()
+
+    def generate_live2d_params(self, reply_text: str, emotion: str, intensity: float) -> dict:
+        """
+        生成 Live2D 参数：优先 LLM 生成，失败回退到静态映射。
+        """
+        result = self.live2d_generator.generate(reply_text, emotion, intensity)
+        if result is not None:
+            return result
+
+        print("[CompanionAgent] LLM Live2D 生成失败，回退到静态映射")
+        from emotion_live2d_map import get_live2d_params
+        fallback = get_live2d_params(emotion, intensity)
+        print(f"[CompanionAgent] 静态映射结果: emotion={emotion}, params数={len(fallback['params'])}")
+        return fallback

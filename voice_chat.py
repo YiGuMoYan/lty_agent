@@ -24,6 +24,7 @@ except ImportError:
 
 from rag_core.companion_agent import CompanionAgent
 
+
 # CosyVoice 服务地址
 TTS_SERVER = os.getenv("TTS_SERVER", "http://172.22.11.92:9880")
 

@@ -35,3 +35,10 @@ EMBEDDING_LOCAL_PATH = os.getenv("EMBEDDING_LOCAL_PATH", os.path.join(BASE_DIR, 
 
 DEBUG = os.getenv("DEBUG", "True").lower() == "true"
 
+# WebSocket Server
+WS_PORT = int(os.getenv("WS_PORT", "8765"))
+
+# TTS (Text-to-Speech) Config
+TTS_SERVER = os.getenv("TTS_SERVER", "http://cosyvoice-lty-dzxzbwpnzo.cn-hangzhou.fcapp.run")
+TTS_ENABLED = os.getenv("TTS_ENABLED", "True").lower() == "true"
+
