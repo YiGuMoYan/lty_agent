@@ -1,6 +1,7 @@
 import json
 import os
 from typing import Optional, Dict
+from datetime import datetime
 from .llm_client import LLMClient
 from .rag_tools import AVAILABLE_TOOLS
 from .router import IntentRouter
@@ -326,7 +327,8 @@ class CompanionAgent:
         # Original code said: # history只存原始user_input
         # But code was: self.history.append({"role": "user", "content": full_user_msg})
         # So it stored full_user_msg.
-        self.history.append({"role": "user", "content": full_user_msg})
+        time_str = datetime.now().strftime("[%H:%M]")
+        self.history.append({"role": "user", "content": f"{time_str} {full_user_msg}"})
 
         print(f"[Companion] Generating response...")
         import time as _time
@@ -361,7 +363,7 @@ class CompanionAgent:
             except Exception as e:
                 print(f"[Companion] 保存情感记忆失败: {e}")
 
-        self.history.append({"role": "assistant", "content": final_answer})
+        self.history.append({"role": "assistant", "content": f"{time_str} {final_answer}"})
 
         # 5. 上下文截断
         self._trim_history()
@@ -438,7 +440,8 @@ class CompanionAgent:
         _start = _time.perf_counter()
 
         # 构建messages（不含system，由unified_generator添加）
-        messages = self.history[1:] + [{"role": "user", "content": full_user_msg}]
+        time_str = datetime.now().strftime("[%H:%M]")
+        messages = self.history[1:] + [{"role": "user", "content": f"{time_str} {full_user_msg}"}]
 
         unified_result = self.unified_generator.generate(
             messages=messages,
@@ -455,8 +458,8 @@ class CompanionAgent:
             live2d_data = unified_result["live2d"]
 
             # 6. 更新历史
-            self.history.append({"role": "user", "content": full_user_msg})
-            self.history.append({"role": "assistant", "content": text})
+            self.history.append({"role": "user", "content": f"{time_str} {full_user_msg}"})
+            self.history.append({"role": "assistant", "content": f"{time_str} {text}"})
 
             # 7. 保存情感记忆
             if self.use_emotional_mode and emotion_state and self.emotional_memory:
