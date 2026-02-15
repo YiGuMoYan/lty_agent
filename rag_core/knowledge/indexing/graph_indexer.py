@@ -1,9 +1,12 @@
 
 import json
 import os
+import asyncio
+from typing import List, Dict, Any, Optional
 import networkx as nx
 import pickle
 import difflib  # For fuzzy matching
+from rag_core.utils.logger import logger
 
 class GraphIndexer:
     def __init__(self, topics_path=None):
@@ -21,11 +24,11 @@ class GraphIndexer:
         if os.path.exists(self.topics_path):
             self.build_graph()
         else:
-            print(f"[GraphIndexer] Warning: Taxonomy file not found at {self.topics_path}")
+            logger.warning(f"[GraphIndexer] Warning: Taxonomy file not found at {self.topics_path}")
 
     def build_graph(self):
         """Build graph from topics_master.json."""
-        print("[GraphIndexer] Building knowledge graph...")
+        logger.info("[GraphIndexer] Building knowledge graph...")
         try:
             with open(self.topics_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
@@ -49,10 +52,10 @@ class GraphIndexer:
                             # Complex timeline object or other struct
                             self._parse_complex_item(item, category)
                             
-            print(f"[GraphIndexer] Graph built. Nodes: {self.graph.number_of_nodes()}, Edges: {self.graph.number_of_edges()}")
+            logger.info(f"[GraphIndexer] Graph built. Nodes: {self.graph.number_of_nodes()}, Edges: {self.graph.number_of_edges()}")
             
         except Exception as e:
-            print(f"[GraphIndexer] Error building graph: {e}")
+            logger.error(f"[GraphIndexer] Error building graph: {e}")
 
     def _add_entity(self, name, category):
         """Add an entity node and link to category."""
@@ -119,7 +122,7 @@ class GraphIndexer:
             # cutoff=0.6 means 60% similarity
             fuzzy_matches = difflib.get_close_matches(entity_name, all_nodes, n=3, cutoff=0.6)
             if fuzzy_matches:
-                print(f"[GraphIndexer] Fuzzy match: '{entity_name}' -> {fuzzy_matches}")
+                logger.debug(f"[GraphIndexer] Fuzzy match: '{entity_name}' -> {fuzzy_matches}")
                 candidates = fuzzy_matches
 
         # If we found candidates (Substring or Fuzzy)
@@ -149,18 +152,27 @@ class GraphIndexer:
         # No matches found
         return []
 
+    async def search_graph_async(self, entity_name: str, relation_type: Optional[str] = None, hops: int = 1) -> List[Dict[str, Any]]:
+        """
+        异步搜索图谱 - 使用 run_in_executor 包装同步搜索
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, self.search_graph, entity_name, relation_type, hops
+        )
+
 if __name__ == "__main__":
     indexer = GraphIndexer()
     
     # Test
     q = "必胜客"
-    print(f"\nSearching graph for: {q}")
+    logger.debug(f"\nSearching graph for: {q}")
     res = indexer.search_graph(q)
     for r in res:
-        print(r)
+        logger.debug(r)
         
     q2 = "2018"
-    print(f"\nSearching graph for: {q2}")
+    logger.debug(f"\nSearching graph for: {q2}")
     res2 = indexer.search_graph(q2)
     for r in res2:
-        print(r)
+        logger.debug(r)

@@ -1,9 +1,12 @@
 
 import json
 import os
+import asyncio
+from typing import List, Dict, Any
 import jieba
 from rank_bm25 import BM25Okapi
 import numpy as np
+from rag_core.utils.logger import logger
 
 class LyricsIndexer:
     def __init__(self, data_path=None):
@@ -27,7 +30,7 @@ class LyricsIndexer:
             self.load_data()
             self.build_index()
         else:
-            print(f"[LyricsIndexer] Warning: Data file not found at {self.data_path}")
+            logger.warning(f"[LyricsIndexer] Warning: Data file not found at {self.data_path}")
 
     def load_data(self):
         """Load lyrics from JSONL file."""
@@ -37,9 +40,9 @@ class LyricsIndexer:
                 for line in f:
                     if line.strip():
                         self.songs.append(json.loads(line))
-            print(f"[LyricsIndexer] Loaded {len(self.songs)} songs.")
+            logger.info(f"[LyricsIndexer] Loaded {len(self.songs)} songs.")
         except Exception as e:
-            print(f"[LyricsIndexer] Error loading data: {e}")
+            logger.error(f"[LyricsIndexer] Error loading data: {e}")
 
     def _tokenize(self, text):
         """Tokenize Chinese text using jieba."""
@@ -48,10 +51,10 @@ class LyricsIndexer:
 
     def build_index(self):
         """Build BM25 index from lyrics."""
-        print("[LyricsIndexer] Building BM25 index...")
+        logger.info("[LyricsIndexer] Building BM25 index...")
         self.tokenized_corpus = [self._tokenize(song.get('lyrics', '')) for song in self.songs]
         self.bm25 = BM25Okapi(self.tokenized_corpus)
-        print("[LyricsIndexer] Index built successfully.")
+        logger.info("[LyricsIndexer] Index built successfully.")
 
     def search_lyrics(self, query, top_k=3):
         """
@@ -62,13 +65,13 @@ class LyricsIndexer:
         """
         if not self.bm25:
             return []
-        
+
         tokenized_query = self._tokenize(query)
         doc_scores = self.bm25.get_scores(tokenized_query)
-        
+
         # Get top_k indices
         top_n = np.argsort(doc_scores)[::-1][:top_k]
-        
+
         results = []
         for idx in top_n:
             score = doc_scores[idx]
@@ -81,8 +84,15 @@ class LyricsIndexer:
                     "full_lyrics": song.get("lyrics", ""),
                     "score": float(score)
                 })
-        
+
         return results
+
+    async def search_lyrics_async(self, query: str, top_k: int = 3) -> List[Dict[str, Any]]:
+        """
+        异步搜索歌词 - 使用 run_in_executor 包装同步搜索
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self.search_lyrics, query, top_k)
 
     def get_song_by_title(self, title):
         """
@@ -126,14 +136,14 @@ if __name__ == "__main__":
     
     # Test 1: Search Lyrics
     q = "好想吃布丁"
-    print(f"\nSearching for: {q}")
+    logger.debug(f"\nSearching for: {q}")
     results = indexer.search_lyrics(q)
     for res in results:
-        print(f"Title: {res['song_title']}, Score: {res['score']}")
+        logger.debug(f"Title: {res['song_title']}, Score: {res['score']}")
 
     # Test 2: Search Title
     t = "66CCFF"
-    print(f"\nSearching for title: {t}")
+    logger.debug(f"\nSearching for title: {t}")
     songs = indexer.get_song_by_title(t)
     for s in songs:
-        print(f"Found: {s['song_title']}")
+        logger.debug(f"Found: {s['song_title']}")

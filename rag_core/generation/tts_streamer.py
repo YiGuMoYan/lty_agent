@@ -2,20 +2,25 @@ import asyncio
 import base64
 import json
 import traceback
-from typing import AsyncGenerator, Optional, Callable, Any
+from typing import AsyncGenerator, Optional, Callable, Any, Dict
+
+from rag_core.generation.async_tts_client import AsyncTTSClient
+from rag_core.utils.logger import logger
 
 class TTSStreamer:
     """
     Handles TTS streaming logic for WebSocket connections using AsyncTTSClient.
     """
-    def __init__(self, tts_client: Any):
+    def __init__(self, tts_client: Optional[AsyncTTSClient] = None) -> None:
         self.tts_client = tts_client
 
-    async def stream_audio(self,
-                          text: str,
-                          instruct: str,
-                          websocket_send_json: Callable[[dict], Any],
-                          loop: asyncio.AbstractEventLoop = None) -> bool:
+    async def stream_audio(
+        self,
+        text: str,
+        instruct: Optional[str],
+        websocket_send_json: Callable[[Dict[str, Any]], Any],
+        loop: Optional[asyncio.AbstractEventLoop] = None
+    ) -> bool:
         """
         Generates and sends audio chunks via websocket using async iterator.
 
@@ -43,7 +48,7 @@ class TTSStreamer:
                 break
 
             if not first_chunk:
-                print("[TTS] Stream empty or failed to start")
+                logger.warning("[TTS] Stream empty or failed to start")
                 return False
 
             # 3. Send Audio Start
@@ -64,7 +69,7 @@ class TTSStreamer:
                     chunk_count += 1
                     await self._send_chunk(chunk, chunk_count, websocket_send_json)
 
-            print(f"[TTS] Stream finished: {chunk_count} chunks")
+            logger.info(f"[TTS] Stream finished: {chunk_count} chunks")
 
             # 6. Send Audio End
             await websocket_send_json({
@@ -75,11 +80,16 @@ class TTSStreamer:
             return True
 
         except Exception as e:
-            print(f"[TTS] Streaming failed: {e}")
+            logger.error(f"[TTS] Streaming failed: {e}")
             traceback.print_exc()
             return False
 
-    async def _send_chunk(self, chunk: bytes, chunk_id: int, send_func: Callable):
+    async def _send_chunk(
+        self,
+        chunk: bytes,
+        chunk_id: int,
+        send_func: Callable[[Dict[str, Any]], Any]
+    ) -> None:
         chunk_base64 = base64.b64encode(chunk).decode('utf-8')
         await send_func({
             "type": "audio_chunk",

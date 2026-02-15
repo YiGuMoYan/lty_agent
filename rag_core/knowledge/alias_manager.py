@@ -2,6 +2,7 @@ import json
 import os
 import re
 from typing import Dict, Optional
+from rag_core.utils.logger import logger
 
 class AliasManager:
     def __init__(self, alias_path: str = None):
@@ -20,11 +21,11 @@ class AliasManager:
             try:
                 with open(self.alias_path, 'r', encoding='utf-8') as f:
                     self.aliases = json.load(f)
-                print(f"[AliasManager] Loaded {len(self.aliases)} aliases")
+                logger.info(f"[AliasManager] Loaded {len(self.aliases)} aliases")
             except Exception as e:
-                print(f"[AliasManager] Error loading aliases: {e}")
+                logger.error(f"[AliasManager] Error loading aliases: {e}")
         else:
-            print(f"[AliasManager] Alias file not found at {self.alias_path}")
+            logger.warning(f"[AliasManager] Alias file not found at {self.alias_path}")
 
     def normalize(self, text: str) -> str:
         """

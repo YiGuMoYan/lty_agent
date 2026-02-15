@@ -3,6 +3,7 @@ from typing import List
 from openai import OpenAI
 
 import config
+from rag_core.utils.logger import logger
 
 Documents = List[str]
 Embeddings = List[List[float]]
@@ -44,11 +45,11 @@ class LocalBGEEmbeddingFunction(EmbeddingFunction):
     """
     def __init__(self, model_path=None):
         model_path = model_path or config.EMBEDDING_LOCAL_PATH
-        print(f"[Embedding] Loading local BGE-M3 model from: {model_path}")
+        logger.info(f"[Embedding] Loading local BGE-M3 model from: {model_path}")
         from sentence_transformers import SentenceTransformer
         import torch
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"[Embedding] Using device: {device.upper()}")
+        logger.info(f"[Embedding] Using device: {device.upper()}")
         self.model = SentenceTransformer(model_path, device=device)
 
     def __call__(self, input: Documents) -> Embeddings:
@@ -63,14 +64,14 @@ def get_embedding_function():
     if backend == "local":
         if not os.path.exists(config.EMBEDDING_LOCAL_PATH):
             raise ValueError(f"[Embedding] Local model not found: {config.EMBEDDING_LOCAL_PATH}")
-        print(f"[Embedding] Using local BGE-M3 ({config.EMBEDDING_LOCAL_PATH})")
+        logger.info(f"[Embedding] Using local BGE-M3 ({config.EMBEDDING_LOCAL_PATH})")
         return LocalBGEEmbeddingFunction()
 
     if backend == "cloud":
         if not (config.GEN_API_KEY or os.getenv("DASHSCOPE_API_KEY")):
             # raise ValueError("[Embedding] Cloud mode requires GEN_API_KEY or DASHSCOPE_API_KEY") # Warning instead
-            print("[Embedding] Warning: Cloud mode requires GEN_API_KEY. Using mock/empty if fails.")
-        print(f"[Embedding] Using Dashscope cloud ({config.EMBEDDING_MODEL_NAME}, dim={config.EMBEDDING_DIM})")
+            logger.warning("[Embedding] Warning: Cloud mode requires GEN_API_KEY. Using mock/empty if fails.")
+        logger.info(f"[Embedding] Using Dashscope cloud ({config.EMBEDDING_MODEL_NAME}, dim={config.EMBEDDING_DIM})")
         return DashScopeEmbeddingFunction()
 
     raise ValueError(f"[Embedding] Unknown EMBEDDING_BACKEND: '{backend}'. Use 'local' or 'cloud'.")

@@ -14,7 +14,7 @@ PARAM_RANGES = {
     "ParamBrowLAngle": (-1, 1), "ParamBrowRAngle": (-1, 1),
     "ParamMouthForm": (-1, 1), "ParamMouthOpenY": (0, 1),
     "ParamCheek": (0, 1),
-    "ParamBodyAngleX": (-4, 4), "ParamBodyAngleY": (-4, 4), "ParamBodyAngleZ": (-4, 4),
+    "ParamBodyAngleX": (-10, 10), "ParamBodyAngleY": (-10, 10), "ParamBodyAngleZ": (-10, 10),
     "ParamBreath": (0, 1),
 }
 
@@ -34,29 +34,33 @@ REQUIRED_PARAMS = [
     "ParamMouthForm", "ParamMouthOpenY"
 ]
 
-# 参数默认值（当LLM未生成时使用）
-DEFAULT_PARAMS = {
+# 中性基线参数（情绪映射的起点，也作为默认值）
+# 注意：此字典同时用于情绪插值和 LLM 未生成参数时的备用
+NEUTRAL_PARAMS = {
     "ParamAngleX": 0,
     "ParamAngleY": 0,
     "ParamAngleZ": 0,
-    "ParamEyeLOpen": 0.8,
-    "ParamEyeROpen": 0.8,
-    "ParamEyeLSmile": 0.0,
-    "ParamEyeRSmile": 0.0,
-    "ParamEyeBallX": 0.0,
-    "ParamEyeBallY": 0.0,
-    "ParamBrowLY": 0.0,
-    "ParamBrowRY": 0.0,
-    "ParamBrowLAngle": 0.0,
-    "ParamBrowRAngle": 0.0,
-    "ParamMouthForm": 0.0,
-    "ParamMouthOpenY": 0.0,
-    "ParamCheek": 0.0,
-    "ParamBodyAngleX": 0.0,
-    "ParamBodyAngleY": 0.0,
-    "ParamBodyAngleZ": 0.0,
-    "ParamBreath": 0.3,
+    "ParamEyeLOpen": 1,
+    "ParamEyeROpen": 1,
+    "ParamEyeLSmile": 0,
+    "ParamEyeRSmile": 0,
+    "ParamEyeBallX": 0,
+    "ParamEyeBallY": 0,
+    "ParamBrowLY": 0,
+    "ParamBrowRY": 0,
+    "ParamBrowLAngle": 0,
+    "ParamBrowRAngle": 0,
+    "ParamMouthForm": 0,
+    "ParamMouthOpenY": 0,
+    "ParamCheek": 0,
+    "ParamBodyAngleX": 0,
+    "ParamBodyAngleY": 0,
+    "ParamBodyAngleZ": 0,
+    "ParamBreath": 0,
 }
+
+# 参数默认值（当LLM未生成时使用），使用与 NEUTRAL_PARAMS 相同的值
+DEFAULT_PARAMS = NEUTRAL_PARAMS.copy()
 
 
 def clamp_param(param_name: str, value: float) -> float:

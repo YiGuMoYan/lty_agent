@@ -3,29 +3,8 @@
 将 EmotionState 的 primary_emotion + intensity 转换为 Live2D 模型参数字典
 """
 
-# 中性基线参数（所有情绪的起点）
-NEUTRAL_PARAMS = {
-    "ParamAngleX": 0,
-    "ParamAngleY": 0,
-    "ParamAngleZ": 0,
-    "ParamEyeLOpen": 1,
-    "ParamEyeROpen": 1,
-    "ParamEyeLSmile": 0,
-    "ParamEyeRSmile": 0,
-    "ParamEyeBallX": 0,
-    "ParamEyeBallY": 0,
-    "ParamBrowLY": 0,
-    "ParamBrowRY": 0,
-    "ParamBrowLAngle": 0,
-    "ParamBrowRAngle": 0,
-    "ParamMouthForm": 0,
-    "ParamMouthOpenY": 0,
-    "ParamCheek": 0,
-    "ParamBodyAngleX": 0,
-    "ParamBodyAngleY": 0,
-    "ParamBodyAngleZ": 0,
-    "ParamBreath": 0,
-}
+# 从 constants 导入中性基线参数
+from rag_core.generation.live2d_constants import NEUTRAL_PARAMS
 
 # 每种情绪在 intensity=1.0 时的目标参数（只列出与中性不同的）
 # 眼球始终看前方（不设置 EyeBallX/Y），表情幅度加大
@@ -118,8 +97,16 @@ EMOTION_PARAMS = {
 }
 
 # 高强度时可触发的姿势参数 {emotion: (param_id, threshold)}
+# 姿势名称需要与实际的 Live2D 模型参数匹配，如果不确定可设为 None
 EMOTION_POSES = {
     "开心": ("ParamPOSE2", 0.75),  # 打招呼
+    "难过": ("ParamPOSE7", 0.6),   # 无奈摊手
+    "焦虑": ("ParamPOSE4", 0.5),   # 思考/不安
+    "孤独": ("ParamPOSE8", 0.4),   # 低落
+    "愤怒": ("ParamPOSE1", 0.7),   # 抬手
+    "疲惫": ("ParamPOSE5", 0.3),   # 无力
+    "困惑": ("ParamPOSE4", 0.5),   # 思考
+    "平静": (None, 0),             # 平静不需要特殊姿势
 }
 
 
@@ -153,7 +140,16 @@ class Live2DSmoother:
         self.current_params = NEUTRAL_PARAMS.copy()
         self.alpha = alpha  # 平滑系数 (0.0-1.0)，越小越平滑但延迟越高
 
-    def smooth(self, target_params: dict) -> dict:
+    def smooth(self, target_params: dict, alpha: float = None) -> dict:
+        """平滑过渡到目标参数
+
+        Args:
+            target_params: 目标参数字典
+            alpha: 平滑系数，如果为None则使用self.alpha
+        """
+        if alpha is None:
+            alpha = self.alpha
+
         smoothed = {}
         # 遍历所有目标参数
         for key, target_val in target_params.items():
@@ -161,7 +157,7 @@ class Live2DSmoother:
             current_val = self.current_params.get(key, target_val)
 
             # 低通滤波: y[i] = α * x[i] + (1-α) * y[i-1]
-            new_val = self.alpha * target_val + (1 - self.alpha) * current_val
+            new_val = alpha * target_val + (1 - alpha) * current_val
 
             smoothed[key] = new_val
             self.current_params[key] = new_val

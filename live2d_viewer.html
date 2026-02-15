@@ -532,7 +532,7 @@
             60% {transform: translateY(-5px);}
         }
 
-    <style>
+    /* <style> */
         /* ... existing styles ... */
 
         /* 确保背景装饰层可见且全屏 */
@@ -1137,6 +1137,80 @@
             }
             scheduleBlink();
             console.log('[Live2D] 眨眼循环已启动');
+        }
+
+        // ===== 空闲动作引擎 (Idle Engine) =====
+        let idleTimer = null;
+        const IDLE_INTERVAL_MIN = 6000; // 最小间隔 6秒
+        const IDLE_INTERVAL_MAX = 12000; // 最大间隔 12秒
+
+        function triggerIdleMotion() {
+            if (!currentModel || isTalking || isTransitioning) return;
+
+            // 根据当前情绪决定空闲动作倾向
+            // 平静: 微呼吸, 轻微侧头
+            // 开心: 眼睛微弯, 身体轻晃
+            // 焦虑: 视线游移, 眉毛微动
+
+            const params = {};
+            const duration = 1500 + Math.random() * 1000;
+
+            // 1. 基础呼吸 (始终存在)
+            params['ParamBreath'] = 0.3 + Math.random() * 0.4;
+
+            // 2. 视线游移 (EyeBall)
+            if (Math.random() > 0.4) {
+                // 避免大幅度翻白眼，限制在小范围内
+                params['ParamEyeBallX'] = (Math.random() - 0.5) * 0.4;
+                params['ParamEyeBallY'] = (Math.random() - 0.5) * 0.3;
+            }
+
+            // 3. 头部微动 (Head Tilt)
+            if (Math.random() > 0.5) {
+                params['ParamAngleZ'] = (Math.random() - 0.5) * 6; // +/- 3度
+                params['ParamAngleY'] = (Math.random() - 0.5) * 4;
+            }
+
+            // 4. 情绪特异性动作
+            if (currentEmotion === '开心' && Math.random() > 0.6) {
+                params['ParamEyeLSmile'] = 0.3 + Math.random() * 0.3;
+                params['ParamEyeRSmile'] = 0.3 + Math.random() * 0.3;
+                params['ParamBodyAngleZ'] = (Math.random() - 0.5) * 4;
+            } else if (currentEmotion === '焦虑' && Math.random() > 0.6) {
+                params['ParamBrowLAngle'] = -0.2 - Math.random() * 0.2; // 八字眉倾向
+                params['ParamBrowRAngle'] = -0.2 - Math.random() * 0.2;
+            }
+
+            // 执行过渡
+            console.log('[Idle] 触发空闲动作:', currentEmotion);
+            startTransition(params, duration);
+
+            // 动作结束后慢慢恢复中性（如果不说话）
+            setTimeout(() => {
+                if (!isTalking) {
+                    // 只恢复头部和身体，保留一点表情余韵
+                    const resetParams = {
+                        'ParamAngleZ': 0,
+                        'ParamAngleY': 0,
+                        'ParamBodyAngleZ': 0,
+                        'ParamEyeBallX': 0,
+                        'ParamEyeBallY': 0
+                    };
+                    startTransition(resetParams, 2000);
+                }
+            }, duration + 500);
+        }
+
+        function startIdleLoop() {
+            function scheduleIdle() {
+                const delay = IDLE_INTERVAL_MIN + Math.random() * (IDLE_INTERVAL_MAX - IDLE_INTERVAL_MIN);
+                idleTimer = setTimeout(() => {
+                    triggerIdleMotion();
+                    scheduleIdle();
+                }, delay);
+            }
+            scheduleIdle();
+            console.log('[Live2D] 空闲动作引擎已启动');
         }
 
         // ===== 流式音频播放系统 =====
@@ -1777,7 +1851,8 @@
                 // 启动眨眼循环（延迟1秒后启动，确保模型完全初始化）
                 setTimeout(() => {
                     startBlinkLoop();
-                    console.log('[Live2D] 眨眼系统初始化完成');
+                    startIdleLoop(); // 启动空闲引擎
+                    console.log('[Live2D] 动作系统初始化完成');
                 }, 1000);
 
                 // 连接 WebSocket

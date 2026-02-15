@@ -4,6 +4,7 @@ import concurrent.futures
 from .indexing.lyrics_indexer import LyricsIndexer
 from .indexing.fact_indexer import FactIndexer
 from .indexing.graph_indexer import GraphIndexer
+from rag_core.utils.logger import logger
 
 # 同义词映射表
 SYNONYM_MAP = {
@@ -59,12 +60,12 @@ def get_fact_indexer():
         # --- Commercial Robustness: Startup Index Check ---
         try:
             if _fact_idx.count() == 0:
-                print("[RAG Tools] Initializing Vector DB for the first time...")
+                logger.info("[RAG Tools] Initializing Vector DB for the first time...")
                 _fact_idx.index_knowledge_base()
             else:
-                print(f"[RAG Tools] Vector DB ready ({_fact_idx.count()} chunks). Use scripts to refresh.")
+                logger.info(f"[RAG Tools] Vector DB ready ({_fact_idx.count()} chunks). Use scripts to refresh.")
         except Exception as e:
-            print(f"[RAG Tools] Auto-indexing warning: {e}")
+            logger.warning(f"[RAG Tools] Auto-indexing warning: {e}")
     return _fact_idx
 
 # --- Helper Functions ---
@@ -134,7 +135,7 @@ def query_knowledge_graph(entity_name=None, relation_type=None, category=None, *
     if not target:
         return json.dumps({"status": "error", "message": "Missing 'entity_name' argument"})
 
-    print(f"[Tool] query_knowledge_graph: {target}, {relation_type}")
+    logger.debug(f"[Tool] query_knowledge_graph: {target}, {relation_type}")
     results = get_graph_indexer().search_graph(target, relation_type)
     if not results:
         return json.dumps({"status": "not_found", "message": f"No graph node found for {target}"})
@@ -147,7 +148,7 @@ def search_lyrics(lyrics_snippet=None, song_title=None, **kwargs):
     # Robustness: Handle alias
     query = lyrics_snippet or song_title or kwargs.get("query") or kwargs.get("content")
     
-    print(f"[Tool] search_lyrics: query='{query}'")
+    logger.debug(f"[Tool] search_lyrics: query='{query}'")
     
     if not query:
          return json.dumps([])
@@ -155,7 +156,7 @@ def search_lyrics(lyrics_snippet=None, song_title=None, **kwargs):
     # New Feature: Artist Search
     artist = kwargs.get("artist_name")
     if artist:
-        print(f"[Tool] search_lyrics: artist='{artist}'")
+        logger.debug(f"[Tool] search_lyrics: artist='{artist}'")
         songs = get_lyrics_indexer().get_songs_by_artist(artist)
         if songs:
             # Return list of titles
@@ -178,7 +179,7 @@ async def search_knowledge_base(query, filter_category=None):
     Search vector knowledge base with Query Rewriting and Synonym Expansion.
     优化版本：添加同义词扩展、结果重排序
     """
-    print(f"[Tool] search_knowledge_base: {query} (filter={filter_category})")
+    logger.debug(f"[Tool] search_knowledge_base: {query} (filter={filter_category})")
 
     # 1. Query Rewriting (Async)
     try:
@@ -187,13 +188,13 @@ async def search_knowledge_base(query, filter_category=None):
         rewritten_query = await rewriter.rewrite(query)
         effective_query = rewritten_query
     except Exception as e:
-        print(f"[Tool] Rewrite failed, using original: {e}")
+        logger.warning(f"[Tool] Rewrite failed, using original: {e}")
         effective_query = query
 
     # 1.5 同义词扩展
     expanded_queries = expand_synonyms(effective_query)
     if len(expanded_queries) > 1:
-        print(f"[RAG Tools] 同义词扩展: {expanded_queries}")
+        logger.debug(f"[RAG Tools] 同义词扩展: {expanded_queries}")
 
     # --- Commercial Robustness: Topic-Specific Priority Search ---
     # If the query contains a known topic name (e.g. "COP", "ilem"),
@@ -218,7 +219,7 @@ async def search_knowledge_base(query, filter_category=None):
             # Graph search returns list of dicts. We look for 'DirectMatch' or best candidate.
             best_match = graph_matches[0]["result"]
             if best_match != kw:
-                print(f"[RAG Tools] Auto-Correcting '{kw}' -> '{best_match}' (via Graph)")
+                logger.debug(f"[RAG Tools] Auto-Correcting '{kw}' -> '{best_match}' (via Graph)")
                 target_topic = best_match
 
         # 2. Topic Search in Vector DB (High Priority)
@@ -240,7 +241,7 @@ async def search_knowledge_base(query, filter_category=None):
                 if matches:
                     topic_results.extend(matches)
             except Exception as e:
-                print(f"[RAG Tools] Error processing keyword: {e}")
+                logger.warning(f"[RAG Tools] Error processing keyword: {e}")
 
     filters = {"category": filter_category} if filter_category else None
 

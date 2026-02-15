@@ -2,12 +2,15 @@ import os
 import re
 import uuid
 import json
+import asyncio
+from typing import List, Dict, Any, Optional
 import config
 from tqdm import tqdm
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
 import jieba
 from rank_bm25 import BM25Okapi
+from rag_core.utils.logger import logger
 
 class FactIndexer:
     def __init__(self, persist_directory=None):
@@ -21,7 +24,7 @@ class FactIndexer:
         if not os.path.exists(persist_directory):
             os.makedirs(persist_directory)
 
-        print(f"[FactIndexer] Initializing Qdrant at {persist_directory}")
+        logger.info(f"[FactIndexer] Initializing Qdrant at {persist_directory}")
         # Initialize Qdrant in local mode (path-based)
         self.client = QdrantClient(path=persist_directory)
         self.collection_name = "lty_facts"
@@ -33,7 +36,7 @@ class FactIndexer:
 
         # Create collection if not exists
         if not self.client.collection_exists(self.collection_name):
-            print(f"[FactIndexer] Creating collection {self.collection_name} with dim={self.vector_dim}")
+            logger.info(f"[FactIndexer] Creating collection {self.collection_name} with dim={self.vector_dim}")
             self.client.create_collection(
                 collection_name=self.collection_name,
                 vectors_config=models.VectorParams(
@@ -52,7 +55,7 @@ class FactIndexer:
         if not self.client.collection_exists(self.collection_name):
             return
 
-        print("[FactIndexer] Loading documents for BM25...")
+        logger.info("[FactIndexer] Loading documents for BM25...")
         try:
             # Scroll all points
             points = []
@@ -88,10 +91,10 @@ class FactIndexer:
 
             tokenized_corpus = [list(jieba.cut(doc)) for doc in corpus]
             self.bm25 = BM25Okapi(tokenized_corpus)
-            print(f"[FactIndexer] BM25 index built with {len(corpus)} documents.")
+            logger.info(f"[FactIndexer] BM25 index built with {len(corpus)} documents.")
 
         except Exception as e:
-            print(f"[FactIndexer] Failed to build BM25 index: {e}")
+            logger.error(f"[FactIndexer] Failed to build BM25 index: {e}")
 
     def count(self):
         """Return number of entities in collection."""
@@ -194,7 +197,7 @@ class FactIndexer:
         if lyrics_path is None:
             lyrics_path = os.path.join(base_dir, "dataset", "song", "cleaned_lyrics.jsonl")
 
-        print(f"[FactIndexer] Scanning Knowledge Base: {kb_root}")
+        logger.info(f"[FactIndexer] Scanning Knowledge Base: {kb_root}")
 
         texts_to_embed = []
         temp_metas = [] # List of (uuid, payload)
@@ -206,7 +209,7 @@ class FactIndexer:
                 if file.endswith(".md"):
                     md_files.append(os.path.join(root, file))
 
-        print(f"[FactIndexer] Found {len(md_files)} Markdown files.")
+        logger.info(f"[FactIndexer] Found {len(md_files)} Markdown files.")
 
         for path in tqdm(md_files, desc="Parsing Markdown"):
             mtime = os.path.getmtime(path)
@@ -235,12 +238,12 @@ class FactIndexer:
 
         # 2. Scan Lyrics
         if os.path.exists(lyrics_path):
-            print(f"[FactIndexer] Loading Lyrics from: {lyrics_path}")
+            logger.info(f"[FactIndexer] Loading Lyrics from: {lyrics_path}")
             try:
                 with open(lyrics_path, 'r', encoding='utf-8') as f:
                     lyrics_data = [json.loads(line) for line in f if line.strip()]
 
-                print(f"[FactIndexer] Found {len(lyrics_data)} songs.")
+                logger.info(f"[FactIndexer] Found {len(lyrics_data)} songs.")
 
                 for song in tqdm(lyrics_data, desc="Parsing Lyrics"):
                     title = song.get("song_title", "Unknown")
@@ -279,14 +282,14 @@ class FactIndexer:
                         temp_metas.append((unique_id, payload))
 
             except Exception as e:
-                print(f"[FactIndexer] Error loading lyrics: {e}")
+                logger.error(f"[FactIndexer] Error loading lyrics: {e}")
 
         if not temp_metas:
-            print("[FactIndexer] No documents found.")
+            logger.warning("[FactIndexer] No documents found.")
             return
 
-        print(f"[FactIndexer] Total chunks to index: {len(texts_to_embed)}")
-        print("[FactIndexer] Generating Embeddings (Batch)...")
+        logger.info(f"[FactIndexer] Total chunks to index: {len(texts_to_embed)}")
+        logger.info("[FactIndexer] Generating Embeddings (Batch)...")
 
         try:
             vectors = []
@@ -297,7 +300,7 @@ class FactIndexer:
                 batch_vecs = self.embedding_fn(batch_text)
                 vectors.extend(batch_vecs)
         except Exception as e:
-            print(f"[FactIndexer] Embedding generation failed: {e}")
+            logger.error(f"[FactIndexer] Embedding generation failed: {e}")
             import traceback
             traceback.print_exc()
             return
@@ -308,7 +311,7 @@ class FactIndexer:
         for i, (pid, payload) in enumerate(temp_metas):
             points_to_upsert.append(PointStruct(id=pid, vector=vectors[i], payload=payload))
 
-        print(f"[FactIndexer] Inserting {len(points_to_upsert)} points into Qdrant...")
+        logger.info(f"[FactIndexer] Inserting {len(points_to_upsert)} points into Qdrant...")
 
         # Batch upsert
         upsert_batch = 100
@@ -316,7 +319,7 @@ class FactIndexer:
             batch = points_to_upsert[i:i+upsert_batch]
             self.client.upsert(collection_name=self.collection_name, points=batch)
 
-        print("[FactIndexer] Indexing complete.")
+        logger.info("[FactIndexer] Indexing complete.")
         # Rebuild BM25 after indexing
         self._build_bm25_index()
 
@@ -334,6 +337,15 @@ class FactIndexer:
         fused_results = self._rrf_fusion(vector_hits, bm25_hits, k=60)
 
         return fused_results[:top_k]
+
+    async def search_facts_async(self, query: str, filter_dict: Optional[Dict[str, Any]] = None, top_k: int = 3) -> List[Dict[str, Any]]:
+        """
+        异步搜索方法 - 使用 run_in_executor 包装同步搜索
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, self.search_facts, query, filter_dict, top_k
+        )
 
     def _search_bm25(self, query, filter_dict=None, top_k=5):
         if not self.bm25:
@@ -376,13 +388,13 @@ class FactIndexer:
         return results
 
     def _search_vector(self, query, filter_dict=None, top_k=3):
-        print(f"[FactIndexer] Vector Searching: {query}")
+        logger.debug(f"[FactIndexer] Vector Searching: {query}")
 
         # 1. Embed Query
         try:
             query_vector = self.embedding_fn([query])[0]
         except Exception as e:
-            print(f"[FactIndexer] Embedding failed: {e}")
+            logger.error(f"[FactIndexer] Embedding failed: {e}")
             return []
 
         # 2. Build Filter
@@ -416,7 +428,7 @@ class FactIndexer:
                     limit=top_k
                  ).points
         except Exception as e:
-            print(f"[FactIndexer] Qdrant search error: {e}")
+            logger.error(f"[FactIndexer] Qdrant search error: {e}")
             return []
 
         # 4. Format Results
@@ -462,4 +474,4 @@ if __name__ == "__main__":
 
     res = indexer.search_facts("洛天依代言过必胜客吗")
     for r in res:
-        print(f"\n--- Result ({r['metadata'].get('source', '?')}) ---\n{r['content'][:100]}...")
+        logger.debug(f"\n--- Result ({r['metadata'].get('source', '?')}) ---\n{r['content'][:100]}...")

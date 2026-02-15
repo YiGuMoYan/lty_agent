@@ -1,5 +1,6 @@
 from rag_core.llm.llm_client import LLMClient
 from rag_core.knowledge.alias_manager import AliasManager
+from rag_core.utils.logger import logger
 
 class QueryRewriter:
     def __init__(self):
@@ -15,7 +16,7 @@ class QueryRewriter:
         # 1. Alias Normalization
         normalized_query = self.alias_manager.normalize(query)
         if normalized_query != query:
-            print(f"[QueryRewriter] Alias Normalized: '{query}' -> '{normalized_query}'")
+            logger.debug(f"[QueryRewriter] Alias Normalized: '{query}' -> '{normalized_query}'")
 
         # 2. LLM Rewriting
         system_prompt = (
@@ -44,10 +45,10 @@ class QueryRewriter:
             response = await self.client.chat_with_tools(messages)
             if response and response.content:
                 rewritten = response.content.strip()
-                print(f"[QueryRewriter] '{normalized_query}' -> '{rewritten}'")
+                logger.debug(f"[QueryRewriter] '{normalized_query}' -> '{rewritten}'")
                 return rewritten
             return normalized_query
 
         except Exception as e:
-            print(f"[QueryRewriter] Failed to rewrite: {e}")
+            logger.warning(f"[QueryRewriter] Failed to rewrite: {e}")
             return normalized_query

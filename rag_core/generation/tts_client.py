@@ -6,6 +6,7 @@ TTS 客户端 - CosyVoice 语音合成
 import requests
 import os
 from typing import Optional, Generator
+from rag_core.utils.logger import logger
 
 
 class TTSClient:
@@ -16,7 +17,7 @@ class TTSClient:
             "TTS_SERVER", "http://172.22.11.92:9880"
         )
         self.sample_rate = self._get_sample_rate()
-        print(f"[TTS] 服务地址: {self.server_url}, 采样率: {self.sample_rate}")
+        logger.info(f"[TTS] 服务地址: {self.server_url}, 采样率: {self.sample_rate}")
 
     def _get_sample_rate(self) -> int:
         """获取TTS服务采样率"""
@@ -24,7 +25,7 @@ class TTSClient:
             resp = requests.get(f"{self.server_url}/sample_rate", timeout=5)
             return resp.json()["sample_rate"]
         except Exception as e:
-            print(f"[TTS] 无法获取采样率: {e}, 使用默认 22050")
+            logger.warning(f"[TTS] 无法获取采样率: {e}, 使用默认 22050")
             return 22050
 
     def generate_audio(
@@ -51,17 +52,17 @@ class TTSClient:
             resp.raise_for_status()
 
             audio_data = resp.content
-            print(f"[TTS] 生成成功: {len(audio_data)} bytes, 文本长度: {len(text)}")
+            logger.info(f"[TTS] 生成成功: {len(audio_data)} bytes, 文本长度: {len(text)}")
             return audio_data
 
         except requests.exceptions.Timeout:
-            print(f"[TTS] 请求超时: {text[:50]}...")
+            logger.warning(f"[TTS] 请求超时: {text[:50]}...")
             return None
         except requests.exceptions.ConnectionError:
-            print(f"[TTS] 连接失败，请确认服务是否启动: {self.server_url}")
+            logger.error(f"[TTS] 连接失败，请确认服务是否启动: {self.server_url}")
             return None
         except Exception as e:
-            print(f"[TTS] 生成失败: {e}")
+            logger.error(f"[TTS] 生成失败: {e}")
             return None
 
     def generate_stream(
@@ -108,7 +109,7 @@ class TTSClient:
                 yield chunk
 
         except Exception as e:
-            print(f"[TTS] 流式生成失败: {e}")
+            logger.error(f"[TTS] 流式生成失败: {e}")
             return None
 
     def test_connection(self) -> bool:

@@ -4,6 +4,7 @@ from enum import Enum
 from typing import Optional, List, Dict, Any
 from openai import AsyncOpenAI
 import config
+from rag_core.utils.logger import logger
 
 class LLMErrorType(Enum):
     """LLM 错误类型分类"""
@@ -52,7 +53,7 @@ class LLMClient:
         self.max_tokens = getattr(config, 'LLM_MAX_TOKENS', 2048)
         self.timeout = getattr(config, 'LLM_TIMEOUT', 120)
 
-        print(f"[LLMClient] Connecting to {self.base_url} (Model: {self.model_name})")
+        logger.info(f"[LLMClient] Connecting to {self.base_url} (Model: {self.model_name})")
 
         self.client = AsyncOpenAI(
             api_key=self.api_key,
@@ -104,11 +105,11 @@ class LLMClient:
                 last_error = e
                 error_type = self._classify_error(e)
 
-                print(f"[LLMClient] Attempt {attempt + 1}/{self.MAX_RETRIES} failed: {e}")
+                logger.warning(f"[LLMClient] Attempt {attempt + 1}/{self.MAX_RETRIES} failed: {e}")
 
                 # 不可重试的错误直接抛出
                 if not self._is_retryable(error_type):
-                    print(f"[LLMClient] Non-retryable error, giving up: {error_type.value}")
+                    logger.warning(f"[LLMClient] Non-retryable error, giving up: {error_type.value}")
                     break
 
                 # 达到最大重试次数
@@ -117,7 +118,7 @@ class LLMClient:
 
                 # 指数退避等待
                 delay = self.RETRY_DELAYS[attempt] if attempt < len(self.RETRY_DELAYS) else self.RETRY_DELAYS[-1]
-                print(f"[LLMClient] Retrying in {delay}s...")
+                logger.debug(f"[LLMClient] Retrying in {delay}s...")
                 await asyncio.sleep(delay)
 
         # 所有重试都失败
@@ -151,7 +152,7 @@ class LLMClient:
         try:
             return await self._retry_request(_make_request)
         except LLMError as e:
-            print(f"[LLMClient] Final error: {e.message}")
+            logger.error(f"[LLMClient] Final error: {e.message}")
             return None
 
     async def chat(self, messages, temperature=None):
@@ -175,5 +176,5 @@ class LLMClient:
             result = await self._retry_request(_make_request)
             return result if result else "（数据流中断...）"
         except LLMError as e:
-            print(f"[LLMClient] Final error: {e.message}")
+            logger.error(f"[LLMClient] Final error: {e.message}")
             return "（服务暂时不可用，请稍后再试...）"

@@ -10,6 +10,7 @@ import asyncio
 from typing import Dict, Any, Optional
 from rag_core.llm.llm_client import LLMClient
 from rag_core.generation.live2d_constants import PARAM_RANGES, VALID_POSES, fill_missing_params, clamp_param
+from rag_core.utils.logger import logger
 
 # 统一生成的System Prompt增强部分
 LIVE2D_INSTRUCTION = """
@@ -216,7 +217,7 @@ class UnifiedResponseGenerator:
                 )
 
                 elapsed = time.perf_counter() - start
-                print(f"[UnifiedGen] 统一生成耗时: {elapsed:.3f}s (尝试 {attempt + 1}/{max_retries})")
+                logger.info(f"[UnifiedGen] 统一生成耗时: {elapsed:.3f}s (尝试 {attempt + 1}/{max_retries})")
 
                 content = response.choices[0].message.content
                 if not content:
@@ -242,20 +243,20 @@ class UnifiedResponseGenerator:
                 # 质量评估
                 quality_score = self._evaluate_quality(result["text"], emotion)
                 if quality_score < 0.6:
-                    print(f"[UnifiedGen] ⚠️ 质量分数较低: {quality_score:.2f}, 文本: {result['text'][:50]}...")
+                    logger.warning(f"[UnifiedGen] ⚠️ 质量分数较低: {quality_score:.2f}, 文本: {result['text'][:50]}...")
 
-                print(f"[UnifiedGen] ✓ 成功生成 | 文本长度: {len(result['text'])} | 参数数: {len(validated_live2d['params'])} | 质量: {quality_score:.2f}")
+                logger.info(f"[UnifiedGen] ✓ 成功生成 | 文本长度: {len(result['text'])} | 参数数: {len(validated_live2d['params'])} | 质量: {quality_score:.2f}")
                 if validated_live2d.get("pose"):
-                    print(f"[UnifiedGen] ✓ 姿势: {validated_live2d['pose']}")
+                    logger.info(f"[UnifiedGen] ✓ 姿势: {validated_live2d['pose']}")
 
                 return final_result
 
             except Exception as e:
-                print(f"[UnifiedGen] 尝试 {attempt + 1} 失败: {e}")
+                logger.warning(f"[UnifiedGen] 尝试 {attempt + 1} 失败: {e}")
                 if attempt < max_retries - 1:
                     await asyncio.sleep(0.3 * (attempt + 1))
                 else:
-                    print("[UnifiedGen] ⚠️  所有重试失败，使用分离模式fallback")
+                    logger.warning("[UnifiedGen] ⚠️  所有重试失败，使用分离模式fallback")
                     return None
 
         return None

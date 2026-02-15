@@ -4,12 +4,14 @@ Live2D 参数生成器 — 通过 LLM 根据回复文本和情感状态动态生
 优化版本：使用公共常量、改进多样性策略
 """
 
+import asyncio
 import json
 import time
 import random
 from typing import Optional, Dict, Any, List
 from rag_core.llm.llm_client import LLMClient
 from rag_core.generation.live2d_constants import PARAM_RANGES, VALID_POSES, fill_missing_params, clamp_param
+from rag_core.utils.logger import logger
 
 SYSTEM_PROMPT = """你是 Live2D 虚拟形象的**高级表情动作导演**。
 你的任务是根据角色的回复文本和情感状态，创造**生动、自然、多变**的表情和动作组合。
@@ -152,7 +154,7 @@ class Live2DParamGenerator:
         self.client = LLMClient.get_instance()
         self.history: List[Dict[str, Any]] = []  # 记录最近的生成历史，避免重复
 
-    def generate(self, reply_text: str, emotion: str, intensity: float, max_retries: int = 3) -> Optional[Dict[str, Any]]:
+    async def generate(self, reply_text: str, emotion: str, intensity: float, max_retries: int = 3) -> Optional[Dict[str, Any]]:
         """
         通过 LLM 生成 Live2D 参数（带重试和 fallback）。
 
@@ -191,7 +193,9 @@ class Live2DParamGenerator:
                 # 提高 temperature 增强多样性
                 temperature = 0.75 + random.uniform(0, 0.15)
 
-                response = self.client.client.chat.completions.create(
+                # 使用 asyncio.to_thread 将同步 API 调用改为异步
+                response = await asyncio.to_thread(
+                    self.client.client.chat.completions.create,
                     model=self.client.model_name,
                     messages=messages,
                     response_format={"type": "json_object"},
@@ -200,12 +204,12 @@ class Live2DParamGenerator:
 
                 content = response.choices[0].message.content
                 elapsed = time.perf_counter() - start
-                print(f"[Live2DGen] LLM 生成耗时: {elapsed:.3f}s (尝试 {attempt + 1}/{max_retries}, temp={temperature:.2f})")
+                logger.info(f"[Live2DGen] LLM 生成耗时: {elapsed:.3f}s (尝试 {attempt + 1}/{max_retries}, temp={temperature:.2f})")
 
                 if content is None:
                     raise ValueError("LLM 返回空内容")
 
-                print(f"[Live2DGen] LLM 原始输出: {content[:200]}...")
+                logger.debug(f"[Live2DGen] LLM 原始输出: {content[:200]}...")
                 result = json.loads(content)
                 validated = self._validate_and_clamp(result)
 
@@ -217,22 +221,22 @@ class Live2DParamGenerator:
                     self._add_to_history(validated, emotion, intensity)
 
                     non_zero = {k: round(v, 3) for k, v in validated["params"].items() if v != 0}
-                    print(f"[Live2DGen] ✓ 情感={emotion} 强度={intensity:.2f} → {len(non_zero)}个参数")
+                    logger.info(f"[Live2DGen] ✓ 情感={emotion} 强度={intensity:.2f} → {len(non_zero)}个参数")
                     if validated.get("pose"):
-                        print(f"[Live2DGen] ✓ 姿势: {validated['pose']}")
+                        logger.info(f"[Live2DGen] ✓ 姿势: {validated['pose']}")
                     if validated.get("action_sequence"):
-                        print(f"[Live2DGen] ✓ 动作序列: {len(validated['action_sequence'])}步")
+                        logger.info(f"[Live2DGen] ✓ 动作序列: {len(validated['action_sequence'])}步")
 
                     return validated
                 else:
                     raise ValueError("参数验证失败")
 
             except Exception as e:
-                print(f"[Live2DGen] 尝试 {attempt + 1} 失败: {e}")
+                logger.warning(f"[Live2DGen] 尝试 {attempt + 1} 失败: {e}")
                 if attempt < max_retries - 1:
-                    time.sleep(0.3 * (attempt + 1))
+                    await asyncio.sleep(0.3 * (attempt + 1))
                 else:
-                    print("[Live2DGen] ⚠️  所有重试失败，回退到静态映射")
+                    logger.warning("[Live2DGen] ⚠️  所有重试失败，回退到静态映射")
                     return self._fallback_static(emotion, intensity, reply_text)
 
         return self._fallback_static(emotion, intensity, reply_text)
@@ -277,7 +281,21 @@ class Live2DParamGenerator:
                 params["ParamBrowRY"] += random.uniform(-0.1, 0.1)
 
         result["params"] = params
+
+        # 扰动后再clamp一次，确保不越界
+        result["params"] = self._clamp_params(params)
         return result
+
+    def _clamp_params(self, params: dict) -> dict:
+        """将参数限制在合法范围内"""
+        clamped = {}
+        for key, value in params.items():
+            if key in PARAM_RANGES:
+                min_val, max_val = PARAM_RANGES[key]
+                clamped[key] = max(min_val, min(max_val, value))
+            else:
+                clamped[key] = value
+        return clamped
 
     def _add_to_history(self, result: Dict[str, Any], emotion: str, intensity: float):
         """记录生成历史（保留最近10条）"""
@@ -295,7 +313,7 @@ class Live2DParamGenerator:
         """静态映射作为 fallback（增强版）"""
         from emotion_live2d_map import get_live2d_params
 
-        print(f"[Live2DGen] 使用静态映射: {emotion} @ {intensity:.2f}")
+        logger.info(f"[Live2DGen] 使用静态映射: {emotion} @ {intensity:.2f}")
         static_result = get_live2d_params(emotion, intensity)
 
         # 为静态结果添加随机性
@@ -338,23 +356,26 @@ class Live2DParamGenerator:
             return "ParamPOSE8"
 
         # 根据情绪随机选择
-        emotion_pose_map = {
-            "开心": random.choice(["ParamPOSE2", "ParamPOSE3", "ParamPOSE6", None]),
-            "难过": random.choice(["ParamPOSE7", None]),
-            "困惑": random.choice(["ParamPOSE4", None]),
-            "焦虑": random.choice(["ParamPOSE4", None]),
+        EMOTION_POSE_OPTIONS = {
+            "开心": ["ParamPOSE2", "ParamPOSE3", "ParamPOSE6"],
+            "难过": ["ParamPOSE7"],
+            "困惑": ["ParamPOSE4"],
+            "焦虑": ["ParamPOSE4"],
         }
-        return emotion_pose_map.get(emotion)
+        pose_options = EMOTION_POSE_OPTIONS.get(emotion, [])
+        if pose_options:
+            return random.choice(pose_options)
+        return None
 
     def _validate_and_clamp(self, result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """校验并裁剪参数到合法范围"""
         if not isinstance(result, dict) or "params" not in result:
-            print("[Live2DGen] 无效的输出格式，缺少 params 字段")
+            logger.warning("[Live2DGen] 无效的输出格式，缺少 params 字段")
             return None
 
         raw_params = result["params"]
         if not isinstance(raw_params, dict):
-            print("[Live2DGen] params 不是字典")
+            logger.warning("[Live2DGen] params 不是字典")
             return None
 
         clamped_params = {}

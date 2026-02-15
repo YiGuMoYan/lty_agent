@@ -8,6 +8,7 @@ import json
 from typing import Dict, List, Optional
 from dataclasses import dataclass
 from rag_core.llm.llm_client import LLMClient
+from rag_core.utils.logger import logger
 
 # 快速路径置信度阈值
 KEYWORD_HIGH_CONFIDENCE_THRESHOLD = 0.8
@@ -73,12 +74,12 @@ class EmotionalRouter:
 
         # 快速路径：关键词检测置信度非常高，直接返回
         if keyword_result.confidence >= KEYWORD_HIGH_CONFIDENCE_THRESHOLD:
-            print(f"[EmotionalRouter] 快速路径: 关键词置信度 {keyword_result.confidence:.2f} >= {KEYWORD_HIGH_CONFIDENCE_THRESHOLD}, 跳过LLM")
+            logger.debug(f"[EmotionalRouter] 快速路径: 关键词置信度 {keyword_result.confidence:.2f} >= {KEYWORD_HIGH_CONFIDENCE_THRESHOLD}, 跳过LLM")
             return keyword_result
 
         # 2. 检查是否在纯情感倾诉短语列表中
         if any(phrase in user_input for phrase in self._pure_emotional_phrases):
-            print(f"[EmotionalRouter] 快速路径: 检测到纯情感倾诉短语")
+            logger.debug(f"[EmotionalRouter] 快速路径: 检测到纯情感倾诉短语")
             return keyword_result
 
         # 3. 常规路径：使用LLM进行深度情感分析
@@ -200,7 +201,7 @@ class EmotionalRouter:
             )
 
         except Exception as e:
-            print(f"[EmotionalRouter] LLM分析失败: {e}")
+            logger.error(f"[EmotionalRouter] LLM分析失败: {e}")
             return self._detect_emotion_by_keywords(user_input)
 
     def _extract_triggers(self, text: str) -> List[str]:

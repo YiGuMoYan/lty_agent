@@ -1,7 +1,7 @@
 import json
 import os
 import asyncio
-from typing import Optional, Dict
+from typing import Optional, Dict, Any, Tuple
 from datetime import datetime
 from rag_core.utils.logger import logger
 from rag_core.llm.llm_client import LLMClient
@@ -27,6 +27,7 @@ class CompanionAgent:
     }
 
     MAX_HISTORY_TURNS = 30 # Increased for rolling summary buffer
+    MAX_TOKENS = 4000  # 最大 token 数限制
 
     def __init__(self, use_emotional_mode=True, style: Optional[str] = None, use_unified_generator=True):
         self.client = LLMClient.get_instance()
@@ -37,8 +38,8 @@ class CompanionAgent:
         # 初始化 RAG 编排器 (负责情感分析、路由和工具执行)
         self.orchestrator = RagOrchestrator(use_emotional_mode=use_emotional_mode)
 
-        # 初始化 Live2D 平滑器
-        self.smoother = Live2DSmoother(alpha=0.3)
+        # 初始化 Live2D 平滑器 (默认 alpha 会在调用时通过 dynamic_alpha 覆盖)
+        self.smoother = Live2DSmoother(alpha=0.6)
 
         if style:
             try:
@@ -60,6 +61,11 @@ class CompanionAgent:
             self.emotional_memory = None
 
         self.history = []
+
+        # System Prompt 缓存
+        self._cached_base_prompt: Optional[str] = None  # 缓存基础 prompt（不含情感上下文）
+        self._last_emotion_state: Optional[str] = None  # 上次的情感状态标识
+        self._last_built_prompt: Optional[str] = None  # 上次构建的完整 prompt
 
         # Load base system prompt
         prompt_file = PROMPT_PATH
@@ -94,7 +100,44 @@ class CompanionAgent:
             logger.info("情感记忆系统初始化完成")
 
     def _build_system_prompt(self, emotion_state) -> str:
-        """动态构建system prompt，融合基础prompt + 关系状态 + 情感上下文"""
+        """动态构建system prompt，融合基础prompt + 关系状态 + 情感上下文
+
+        优化：缓存不含情感上下文的基础部分，只有情感状态变化时才重建完整 prompt
+        """
+        # 生成当前情感状态标识
+        current_emotion_key = None
+        if emotion_state:
+            current_emotion_key = f"{emotion_state.primary_emotion}:{emotion_state.intensity:.2f}"
+
+        # 如果情感状态没变化，直接返回缓存的完整 prompt
+        if current_emotion_key == self._last_emotion_state and self._last_built_prompt:
+            return self._last_built_prompt
+
+        # 情感状态变化（或首次构建），需要重建
+        # 1. 获取或构建缓存的基础 prompt（不含情感上下文）
+        if self._cached_base_prompt is None:
+            self._cached_base_prompt = self._build_base_prompt()
+
+        # 2. 构建情感上下文
+        emotion_context = ""
+        if emotion_state:
+            emotion_context = f"【当前情感上下文】\n"
+            emotion_context += f"情感: {emotion_state.primary_emotion}(强度:{emotion_state.intensity:.2f})\n"
+            if emotion_state.triggers and emotion_state.triggers != ["日常"]:
+                emotion_context += f"触发因素: {', '.join(emotion_state.triggers)}\n"
+            emotion_context += "\n"
+
+        # 3. 拼接完整 prompt
+        full_prompt = self._cached_base_prompt + emotion_context
+
+        # 4. 更新缓存
+        self._last_emotion_state = current_emotion_key
+        self._last_built_prompt = full_prompt
+
+        return full_prompt
+
+    def _build_base_prompt(self) -> str:
+        """构建基础 prompt（不含情感上下文）"""
         from datetime import datetime
         current_date = datetime.now().strftime("%Y年%m月%d日")
         time_context = f"【系统时间锚点：当前是 {current_date}】\n(请根据此时间判断'去年'、'今年'等相对时间词)\n\n"
@@ -128,14 +171,6 @@ class CompanionAgent:
                 if len(conv_summary) > 1000:
                     display_summary = "..." + display_summary
                 parts.append(f"【长期记忆 (过往对话摘要)】\n{display_summary}\n\n")
-
-        # 情感上下文
-        if emotion_state:
-            parts.append(f"【当前情感上下文】\n")
-            parts.append(f"情感: {emotion_state.primary_emotion}(强度:{emotion_state.intensity:.2f})\n")
-            if emotion_state.triggers and emotion_state.triggers != ["日常"]:
-                parts.append(f"触发因素: {', '.join(emotion_state.triggers)}\n")
-            parts.append("\n")
 
         parts.append(self.base_system_prompt)
         return "".join(parts)
@@ -202,6 +237,15 @@ class CompanionAgent:
         except Exception as e:
             logger.error(f"滚动总结失败: {e}")
 
+    def _estimate_tokens(self, text: str) -> int:
+        """简单估算 token 数量（中英文混合估算）"""
+        if not text:
+            return 0
+        # 简单估算：中文约每字2token，英文约每4字符1token
+        chinese = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
+        english = len(text) - chinese
+        return chinese * 2 + english // 4
+
     async def _trim_history(self):
         """管理上下文窗口，避免历史记录无限增长"""
         # Try summarizing first
@@ -210,11 +254,23 @@ class CompanionAgent:
         if len(self.history) > 1:
             # 始终保留 system prompt (index 0)
             system_prompt = self.history[0]
-            remaining = self.history[1:]
+            messages = self.history[1:]
 
-            # 保留最近 N 轮
-            if len(remaining) > self.MAX_HISTORY_TURNS:
-                 self.history = [system_prompt] + remaining[-self.MAX_HISTORY_TURNS:]
+            # 1. 先按轮数限制
+            if len(messages) > self.MAX_HISTORY_TURNS:
+                messages = messages[-self.MAX_HISTORY_TURNS:]
+
+            # 2. 再按 token 数限制
+            total_tokens = self._estimate_tokens(system_prompt.get("content", ""))
+            trimmed_messages = []
+            for msg in messages:
+                msg_tokens = self._estimate_tokens(msg.get("content", ""))
+                if total_tokens + msg_tokens > self.MAX_TOKENS:
+                    break
+                total_tokens += msg_tokens
+                trimmed_messages.append(msg)
+
+            self.history = [system_prompt] + trimmed_messages
 
     async def chat(self, user_input):
         """
@@ -281,10 +337,42 @@ class CompanionAgent:
         统一生成模式：一次LLM调用同时生成对话和Live2D参数 (Async)
         返回: (回复文本, 语气指令, EmotionState, live2d_data)
         """
-        from rag_core.routers.emotional_router import EmotionState
-        import time as _time
+        # 1. 输入验证
+        validated_input = self._validate_input(user_input)
+        if not validated_input:
+            return None
 
-        # 1. Execute RAG Pipeline via Orchestrator
+        # 2. 执行 RAG Pipeline
+        tool_context, emotion_state = await self._execute_rag_pipeline(validated_input)
+
+        # 3. 更新 system prompt
+        if self.use_emotional_mode and emotion_state:
+            self._update_system_prompt(emotion_state)
+
+        # 4. 构建消息并生成回复
+        full_user_msg = self._build_user_message(validated_input, tool_context)
+        unified_result = await self._generate_unified_response(full_user_msg, emotion_state)
+
+        # 5. 处理结果并返回
+        return await self._process_unified_result(unified_result, emotion_state, full_user_msg)
+
+    def _validate_input(self, user_input: str) -> Optional[str]:
+        """验证并清理用户输入"""
+        if not user_input or len(user_input.strip()) == 0:
+            return None
+
+        # 限制输入长度
+        max_length = 2000
+        if len(user_input) > max_length:
+            user_input = user_input[:max_length]
+
+        # 过滤危险字符（空字符等）
+        return user_input.replace("\x00", "").strip()
+
+    async def _execute_rag_pipeline(self, user_input: str) -> Tuple[Optional[str], "EmotionState"]:
+        """执行 RAG 编排管道"""
+        from rag_core.routers.emotional_router import EmotionState
+
         tool_context, emotion_state, is_pure_emotional = await self.orchestrator.execute(user_input, self.history)
 
         # Ensure emotion_state exists for fallback/generation
@@ -293,22 +381,34 @@ class CompanionAgent:
                 primary_emotion="平静", intensity=0.3, confidence=0.5,
                 context=user_input, triggers=["日常"], timestamp=""
             )
-        emotion = emotion_state.primary_emotion
 
-        # 2. 动态更新system prompt
-        if self.use_emotional_mode and emotion_state:
-            self.history[0] = {"role": "system", "content": self._build_system_prompt(emotion_state)}
-            # 同步更新unified_generator的system prompt
-            if hasattr(self, 'unified_generator'):
-                from rag_core.generation.unified_generator import LIVE2D_INSTRUCTION
-                self.unified_generator.enhanced_system_prompt = self._build_system_prompt(emotion_state) + LIVE2D_INSTRUCTION
+        return tool_context, emotion_state
 
-        # 3. 构建完整user message
+    def _update_system_prompt(self, emotion_state: "EmotionState") -> None:
+        """更新 system prompt"""
+        from rag_core.routers.emotional_router import EmotionState
+        self.history[0] = {"role": "system", "content": self._build_system_prompt(emotion_state)}
+        # 同步更新unified_generator的system prompt
+        if hasattr(self, 'unified_generator'):
+            from rag_core.generation.unified_generator import LIVE2D_INSTRUCTION
+            self.unified_generator.enhanced_system_prompt = self._build_system_prompt(emotion_state) + LIVE2D_INSTRUCTION
+
+    def _build_user_message(self, user_input: str, tool_context: Optional[str]) -> str:
+        """构建用户消息"""
         full_user_msg = user_input
         if tool_context:
             full_user_msg += tool_context
+        return full_user_msg
 
-        # 4. 使用统一生成器（一次LLM调用）
+    async def _generate_unified_response(
+        self,
+        full_user_msg: str,
+        emotion_state: "EmotionState"
+    ) -> Dict[str, Any]:
+        """调用统一生成器生成回复"""
+        from rag_core.routers.emotional_router import EmotionState
+        import time as _time
+
         _start = _time.perf_counter()
 
         # 构建messages（不含system，由unified_generator添加）
@@ -317,54 +417,117 @@ class CompanionAgent:
 
         unified_result = await self.unified_generator.generate(
             messages=messages,
-            emotion=emotion,
+            emotion=emotion_state.primary_emotion,
             intensity=emotion_state.intensity
         )
 
         _elapsed = _time.perf_counter() - _start
         logger.debug(f"统一生成总耗时: {_elapsed:.3f}s")
 
-        # 5. 处理结果
+        return unified_result
+
+    async def _generate_response(
+        self,
+        full_user_msg: str,
+        emotion_state: "EmotionState"
+    ) -> str:
+        """
+        只负责LLM生成，不执行RAG。
+        用于统一生成失败后的回退，避免重复RAG流程。
+        """
+        from rag_core.routers.emotional_router import EmotionState
+
+        time_str = datetime.now().strftime("[%H:%M]")
+        self.history.append({"role": "user", "content": f"{time_str} {full_user_msg}"})
+
+        # 直接调用LLM生成
+        response_msg = await self.client.chat_with_tools(self.history)
+
+        base_answer = ""
+        if response_msg:
+            answer_content = response_msg.content
+            if answer_content is not None:
+                import re
+                base_answer = re.sub(r'[\(（][^\)）]+[\)）]', '', answer_content)
+                base_answer = re.sub(r'\n\s*\n', '\n', base_answer).strip()
+            else:
+                base_answer = "（数据流中断...）"
+        else:
+            base_answer = "（数据流中断...）"
+
+        # 存储助手回复到历史
+        self.history.append({"role": "assistant", "content": f"{time_str} {base_answer}"})
+
+        # 存储情感记忆
+        if self.use_emotional_mode and emotion_state and self.emotional_memory:
+            try:
+                await self.emotional_memory.store_emotional_context(
+                    emotion_state=emotion_state,
+                    user_input=full_user_msg,
+                    ai_response=base_answer,
+                )
+                logger.info("已保存情感记忆")
+            except Exception as e:
+                logger.error(f"保存情感记忆失败: {e}")
+
+        return base_answer
+
+    async def _process_unified_result(
+        self,
+        unified_result: Dict[str, Any],
+        emotion_state: "EmotionState",
+        full_user_msg: str
+    ) -> Tuple[str, str, "EmotionState", Dict[str, Any]]:
+        """处理统一生成结果"""
+        from rag_core.routers.emotional_router import EmotionState
+        time_str = datetime.now().strftime("[%H:%M]")
+        emotion = emotion_state.primary_emotion
+
         if unified_result:
             text = unified_result["text"]
             live2d_data = unified_result["live2d"]
 
-            # Apply Smoothing to params
+            # Apply Smoothing to params (动态调整 alpha：根据情感强度)
             if "params" in live2d_data:
-                live2d_data["params"] = self.smoother.smooth(live2d_data["params"])
+                intensity = emotion_state.intensity if emotion_state else 0.3
+                # 提高 alpha 范围 (0.6-0.9)：前端已有600ms easeOut过渡，后端需要更快响应
+                # 强度越高，alpha越大（响应更快）；强度越低，alpha越小
+                dynamic_alpha = max(0.6, 0.9 - intensity * 0.3)
+                live2d_data["params"] = self.smoother.smooth(live2d_data["params"], alpha=dynamic_alpha)
 
-            # 6. 更新历史
+            # 更新历史
             self.history.append({"role": "user", "content": f"{time_str} {full_user_msg}"})
             self.history.append({"role": "assistant", "content": f"{time_str} {text}"})
 
-            # 7. 保存情感记忆
+            # 保存情感记忆
             if self.use_emotional_mode and emotion_state and self.emotional_memory:
                 try:
                     await self.emotional_memory.store_emotional_context(
                         emotion_state=emotion_state,
-                        user_input=user_input,
+                        user_input=full_user_msg,
                         ai_response=text
                     )
                 except Exception as e:
                     logger.error(f"保存情感记忆失败: {e}")
 
         else:
-            # Fallback: 分离生成
+            # Fallback: 分离生成（不重复RAG，直接调用LLM）
             logger.warning("统一生成失败，回退到分离模式")
-            # Note: This will trigger RAG pipeline again in chat() if we called chat() directly
-            # But here we already have tool_context, so we should just call LLM directly or implement fallback logic
-            # For simplicity, calling self.chat() which re-does RAG is safe but inefficient.
-            # Ideally we should split chat() to chat_with_context()
-            text = await self.chat(user_input)
+            # 直接调用 _generate_response，避免重复执行 RAG 流程
+            text = await self._generate_response(full_user_msg, emotion_state)
             live2d_data = self.generate_live2d_params(text, emotion, emotion_state.intensity)
 
             # Apply Smoothing (generate_live2d_params might return unsmoothed data)
+            # 动态调整 alpha：根据情感强度
+            # 提高 alpha 范围 (0.6-0.9)：前端已有600ms easeOut过渡，后端需要更快响应
             if "params" in live2d_data:
-                live2d_data["params"] = self.smoother.smooth(live2d_data["params"])
+                intensity = emotion_state.intensity if emotion_state else 0.3
+                dynamic_alpha = max(0.6, 0.9 - intensity * 0.3)
+                live2d_data["params"] = self.smoother.smooth(live2d_data["params"], alpha=dynamic_alpha)
 
-            # History and memory are handled inside self.chat()
+            # 历史和记忆已在 _generate_response 中处理
 
-        # 8. Trim History
+        # Trim History
         await self._trim_history()
 
         instruct = self.EMOTION_INSTRUCT_MAP.get(emotion, self.EMOTION_INSTRUCT_MAP["平静"])

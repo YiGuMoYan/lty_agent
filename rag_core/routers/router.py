@@ -3,6 +3,7 @@ import time
 from typing import Optional, Dict, Any, List
 from rag_core.llm.llm_client import LLMClient
 from rag_core.knowledge.rag_tools import TOOLS_SCHEMA
+from rag_core.utils.logger import logger
 
 # 意图缓存配置
 INTENT_CACHE_TTL = 300  # 5分钟
@@ -21,8 +22,25 @@ class IntentCache:
         normalized = re.sub(r'[^\w\u4e00-\u9fff]', '', query)
         return normalized.lower()
 
+    def _cleanup_expired(self):
+        """主动清理所有过期条目"""
+        current_time = time.time()
+        expired_keys = [
+            key for key, ts in self._timestamps.items()
+            if current_time - ts >= INTENT_CACHE_TTL
+        ]
+        for key in expired_keys:
+            self._cache.pop(key, None)
+            self._timestamps.pop(key, None)
+        if expired_keys:
+            logger.debug(f"[IntentCache] Cleaned up {len(expired_keys)} expired entries")
+
     def get(self, query: str) -> Optional[Dict]:
         """获取缓存的意图结果"""
+        # 随机清理：10%概率触发主动清理，避免字典持续增长
+        if len(self._cache) > INTENT_CACHE_MAX_SIZE // 2 and hash(query) % 10 == 0:
+            self._cleanup_expired()
+
         key = self._normalize_query(query)
         if key in self._cache:
             # 检查是否过期
@@ -30,17 +48,21 @@ class IntentCache:
                 return self._cache[key]
             else:
                 # 过期清理
-                del self._cache[key]
-                del self._timestamps[key]
+                self._cache.pop(key, None)
+                self._timestamps.pop(key, None)
         return None
 
     def set(self, query: str, result: Dict):
         """缓存意图结果"""
-        # 简单的LRU：如果缓存满了，删除最老的
+        # 缓存满了时，清理所有过期项后再添加
+        if len(self._cache) >= INTENT_CACHE_MAX_SIZE:
+            self._cleanup_expired()
+
+        # 如果清理后仍然满了，执行LRU淘汰
         if len(self._cache) >= INTENT_CACHE_MAX_SIZE:
             oldest_key = min(self._timestamps, key=self._timestamps.get)
-            del self._cache[oldest_key]
-            del self._timestamps[oldest_key]
+            self._cache.pop(oldest_key, None)
+            self._timestamps.pop(oldest_key, None)
 
         key = self._normalize_query(query)
         self._cache[key] = result
@@ -53,16 +75,22 @@ class IntentRouter:
     def __init__(self):
         self.client = LLMClient.get_instance()
 
-    async def route(self, user_query, history=None):
+    async def route(self, user_query: str, history: Optional[List[Dict[str, Any]]] = None) -> Optional[Dict[str, Any]]:
         """
         Determine if the query needs tools.
         优化：添加意图缓存机制
-        Returns: { "tool": "name", "args": {...} } or None
+
+        Args:
+            user_query: 用户输入的查询
+            history: 对话历史（可选）
+
+        Returns:
+            Optional[Dict[str, Any]]: { "tool": "name", "args": {...} } or None
         """
         # 1. 检查缓存
         cached_result = _intent_cache.get(user_query)
         if cached_result is not None:
-            print(f"[Router] 缓存命中: {user_query[:20]}... -> {cached_result.get('tool')}")
+            logger.debug(f"[Router] 缓存命中: {user_query[:20]}... -> {cached_result.get('tool')}")
             return cached_result
 
         # 2. 正常路由逻辑
@@ -74,8 +102,16 @@ class IntentRouter:
 
         return result
 
-    async def _do_route(self, user_query, history=None):
-        """执行实际的路由逻辑"""
+    async def _do_route(self, user_query: str, history: Optional[List[Dict[str, Any]]] = None) -> Optional[Dict[str, Any]]:
+        """执行实际的路由逻辑
+
+        Args:
+            user_query: 用户输入的查询
+            history: 对话历史（可选）
+
+        Returns:
+            Optional[Dict[str, Any]]: 路由结果，包含 tool 和 args
+        """
         import datetime
         current_date_str = datetime.datetime.now().strftime("%Y-%m-%d")
         current_year = datetime.datetime.now().year
@@ -134,7 +170,7 @@ class IntentRouter:
             {"role": "user", "content": user_query}
         ]
 
-        print(f"[Router] Analyzing: {user_query}")
+        logger.info(f"[Router] Analyzing: {user_query}")
         try:
             # Force JSON mode if supported, or just rely on prompt
             response = await self.client.client.chat.completions.create(
@@ -144,7 +180,7 @@ class IntentRouter:
                 temperature=0.1 # Deterministic
             )
             content = response.choices[0].message.content
-            print(f"[Router] Raw Logic: {content}")
+            logger.debug(f"[Router] Raw Logic: {content}")
 
             result = json.loads(content)
             if result.get("tool"):
@@ -152,5 +188,5 @@ class IntentRouter:
             return None
 
         except Exception as e:
-            print(f"[Router] Error: {e}")
+            logger.error(f"[Router] Error: {e}")
             return None
