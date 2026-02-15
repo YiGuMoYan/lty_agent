@@ -4,13 +4,11 @@ import asyncio
 from typing import Optional, Dict
 from datetime import datetime
 from rag_core.llm.llm_client import LLMClient
-from rag_core.knowledge.rag_tools import AVAILABLE_TOOLS
-from rag_core.routers.router import IntentRouter
-from rag_core.routers.emotional_router import EmotionalRouter
 from rag_core.emotions.emotional_memory import EmotionalMemory
 from rag_core.generation.live2d_generator import Live2DParamGenerator
 from rag_core.generation.unified_generator import UnifiedResponseGenerator
 from rag_core.generation.response_style import StyleManager, ResponseStyle, parse_style_from_string
+from rag_core.agent.rag_orchestrator import RagOrchestrator
 from config import PROMPT_PATH, DEFAULT_RESPONSE_STYLE
 
 class CompanionAgent:
@@ -30,10 +28,12 @@ class CompanionAgent:
 
     def __init__(self, use_emotional_mode=True, style: Optional[str] = None, use_unified_generator=True):
         self.client = LLMClient()
-        self.router = IntentRouter()
         self.live2d_generator = Live2DParamGenerator()
         self.use_emotional_mode = use_emotional_mode
         self.use_unified_generator = use_unified_generator  # 是否使用统一生成器
+
+        # 初始化 RAG 编排器 (负责情感分析、路由和工具执行)
+        self.orchestrator = RagOrchestrator(use_emotional_mode=use_emotional_mode)
 
         if style:
             try:
@@ -50,10 +50,8 @@ class CompanionAgent:
         self.style_manager = StyleManager(default_style=initial_style)
 
         if use_emotional_mode:
-            self.emotional_router = EmotionalRouter()
             self.emotional_memory = EmotionalMemory()
         else:
-            self.emotional_router = None
             self.emotional_memory = None
 
         self.history = []
@@ -207,132 +205,12 @@ class CompanionAgent:
             if len(remaining) > self.MAX_HISTORY_TURNS:
                  self.history = [system_prompt] + remaining[-self.MAX_HISTORY_TURNS:]
 
-    async def _execute_rag_pipeline(self, user_input):
-        """
-        执行核心 RAG 流程：情感分析 -> 意图路由 -> 工具执行 (含 DeepSearch) -> 返回上下文
-        Returns: (tool_context, emotion_state, is_pure_emotional)
-        """
-        # 0. 情感分析
-        emotion_state = None
-        is_pure_emotional = False
-
-        if self.use_emotional_mode and self.emotional_router:
-            try:
-                emotion_state = await self.emotional_router.analyze_emotion(user_input, self.history)
-                is_pure_emotional = self.emotional_router.is_pure_emotional_query(user_input, emotion_state)
-                if is_pure_emotional:
-                    print(f"[Companion] 纯情感倾诉: {emotion_state.primary_emotion}(强度:{emotion_state.intensity:.2f})")
-            except Exception as e:
-                print(f"[Companion] 情感分析失败: {e}")
-
-        # 1. Intent Routing — 始终执行（除非纯情感倾诉）
-        route_result = None
-        if not is_pure_emotional:
-            route_result = await self.router.route(user_input, history=self.history)
-
-        tool_context = ""
-
-        if route_result and route_result.get("tool"):
-            func_name = route_result["tool"]
-            func_args = route_result.get("args", {})
-            print(f"[Companion] Router detected intent: {func_name}({func_args})")
-
-            if func_name in AVAILABLE_TOOLS:
-                function_to_call = AVAILABLE_TOOLS[func_name]
-                try:
-                    # Note: Tool functions are synchronous for now (unless we refactor rag_tools.py)
-                    # Running them in executor to avoid blocking if they are slow
-                    loop = asyncio.get_running_loop()
-                    tool_result = await loop.run_in_executor(None, lambda: function_to_call(**func_args))
-
-                    # --- DeepSearch (Multi-hop) ---
-                    candidates = set()
-                    parsed_res = []
-                    try:
-                        parsed_res = json.loads(tool_result)
-                    except:
-                        pass
-
-                    if isinstance(parsed_res, list):
-                        for item in parsed_res:
-                            if isinstance(item, str):
-                                candidates.add(item)
-                            elif isinstance(item, dict) and "result" in item:
-                                candidates.add(item["result"])
-                            # Add support for structured objects returned by tools
-                            elif isinstance(item, dict) and "song_title" in item:
-                                candidates.add(item["song_title"])
-                            elif isinstance(item, dict) and "content" in item:
-                                # Extract entities from content? Heuristic.
-                                pass
-
-                    import re
-                    text_content = str(tool_result)
-                    matches = re.findall(r'[「《](.*?)[」》]', text_content)
-                    for m in matches:
-                        candidates.add(m)
-
-                    original_query = func_args.get('entity_name', '') or func_args.get('query', '')
-                    if original_query in candidates:
-                        candidates.remove(original_query)
-
-                    final_candidates = list(candidates)[:2]
-
-                    if final_candidates:
-                        print(f"[Companion] DeepSearch detected entities: {final_candidates}. Triggering recursive lookup...")
-                        from rag_core.knowledge.rag_tools import search_knowledge_base
-                        extra_info = ""
-
-                        # Parallelize secondary searches
-                        async def fetch_extra(entity):
-                            if len(entity) < 2: return ""
-                            res = await loop.run_in_executor(None, lambda: search_knowledge_base(query=entity))
-                            if res and len(res) > 50 and "[]" not in res:
-                                return f"\\n\\n【关联档案：{entity}】\\n{res}"
-                            return ""
-
-                        extra_results = await asyncio.gather(*[fetch_extra(e) for e in final_candidates])
-                        extra_info = "".join(extra_results)
-
-                        if extra_info:
-                             tool_result += extra_info
-                    # --- End DeepSearch ---
-
-                    # Data Validation
-                    is_empty = False
-                    if not parsed_res and not isinstance(parsed_res, list):
-                         if isinstance(parsed_res, dict) and "status" in parsed_res and parsed_res["status"] == "not_found":
-                              is_empty = True
-                         elif len(parsed_res) == 0:
-                              is_empty = True
-
-                    if is_empty:
-                        if func_name == "query_knowledge_graph":
-                             print(f"[Companion] Graph failed completely. Last resort: KB Search.")
-                             from rag_core.knowledge.rag_tools import search_knowledge_base
-                             kb_res = await loop.run_in_executor(None, lambda: search_knowledge_base(query=func_args.get('entity_name', '')))
-                             if kb_res and kb_res != "[]":
-                                 tool_context = f"\n\n【共鸣雷达补救】\n原图谱查询失败，但在档案库中发现：\n{kb_res}\n(请回答)"
-                             else:
-                                 tool_context = f"\n\n【共鸣雷达反馈】\n结果: 未找到任何相关数据。\n[系统指令] 严禁编造。"
-                        else:
-                             tool_context = f"\n\n【共鸣雷达反馈】\n结果: 未找到任何相关数据。\n[系统指令] 严禁编造。"
-                    else:
-                        tool_context = f"\n\n【共鸣雷达数据】\n工具调用: {func_name}\n检索结果: {tool_result}\n(请根据以上真实数据回答用户。)"
-
-                except Exception as e:
-                    tool_context = f"\n\n【共鸣雷达报错】{str(e)}"
-            else:
-                 print(f"[Companion] Constructing response with tool result...")
-
-        return tool_context, emotion_state, is_pure_emotional
-
     async def chat(self, user_input):
         """
         Process user input: Emotional Analysis -> Intent Routing -> Tool -> Response (Async)
         """
-        # 1. Execute RAG Pipeline
-        tool_context, emotion_state, is_pure_emotional = await self._execute_rag_pipeline(user_input)
+        # 1. Execute RAG Pipeline via Orchestrator
+        tool_context, emotion_state, is_pure_emotional = await self.orchestrator.execute(user_input, self.history)
 
         # 2. 动态构建system prompt（含情感上下文）
         if self.use_emotional_mode and emotion_state:
@@ -396,8 +274,8 @@ class CompanionAgent:
         from rag_core.routers.emotional_router import EmotionState
         import time as _time
 
-        # 1. Execute RAG Pipeline
-        tool_context, emotion_state, is_pure_emotional = await self._execute_rag_pipeline(user_input)
+        # 1. Execute RAG Pipeline via Orchestrator
+        tool_context, emotion_state, is_pure_emotional = await self.orchestrator.execute(user_input, self.history)
 
         # Ensure emotion_state exists for fallback/generation
         if not emotion_state:
