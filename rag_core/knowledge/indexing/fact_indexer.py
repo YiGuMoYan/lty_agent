@@ -3,7 +3,7 @@ import re
 import uuid
 import json
 import asyncio
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Callable
 import config
 from tqdm import tqdm
 from qdrant_client import QdrantClient
@@ -187,8 +187,14 @@ class FactIndexer:
             start += (chunk_size - overlap)
         return chunks
 
-    def index_knowledge_base(self, kb_root=None, lyrics_path=None):
-        """Walk KB directory and index all md files and lyrics."""
+    def index_knowledge_base(self, kb_root=None, lyrics_path=None, progress_callback: Callable[[int, int], None] = None):
+        """Walk KB directory and index all md files and lyrics.
+
+        Args:
+            kb_root: Path to knowledge base directory.
+            lyrics_path: Path to lyrics JSONL file.
+            progress_callback: 进度回调函数，签名为 callback(current, total)
+        """
         base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
         if kb_root is None:
@@ -210,6 +216,10 @@ class FactIndexer:
                     md_files.append(os.path.join(root, file))
 
         logger.info(f"[FactIndexer] Found {len(md_files)} Markdown files.")
+
+        # 计算总进度
+        total_steps = 3  # 1.解析文档 2.生成Embedding 3.插入数据库
+        current_step = 0
 
         for path in tqdm(md_files, desc="Parsing Markdown"):
             mtime = os.path.getmtime(path)
@@ -235,6 +245,10 @@ class FactIndexer:
 
                     texts_to_embed.append(sub_text)
                     temp_metas.append((unique_id, payload))
+
+        # 报告解析完成进度 (20%)
+        if progress_callback:
+            progress_callback(1, total_steps)
 
         # 2. Scan Lyrics
         if os.path.exists(lyrics_path):
@@ -286,6 +300,8 @@ class FactIndexer:
 
         if not temp_metas:
             logger.warning("[FactIndexer] No documents found.")
+            if progress_callback:
+                progress_callback(total_steps, total_steps)
             return
 
         logger.info(f"[FactIndexer] Total chunks to index: {len(texts_to_embed)}")
@@ -295,10 +311,14 @@ class FactIndexer:
             vectors = []
             # Batch size - use config or environment variable
             batch_size = config.EMBEDDING_BATCH_SIZE
-            for i in tqdm(range(0, len(texts_to_embed), batch_size), desc="Embedding"):
-                batch_text = texts_to_embed[i:i+batch_size]
+            total_batches = (len(texts_to_embed) + batch_size - 1) // batch_size
+            for i, idx in enumerate(tqdm(range(0, len(texts_to_embed), batch_size), desc="Embedding")):
+                batch_text = texts_to_embed[idx:idx+batch_size]
                 batch_vecs = self.embedding_fn(batch_text)
                 vectors.extend(batch_vecs)
+                # 报告Embedding进度 (20% -> 60%)
+                if progress_callback and i % 10 == 0:
+                    progress_callback(1 + int((i / total_batches) * 2), total_steps)
         except Exception as e:
             logger.error(f"[FactIndexer] Embedding generation failed: {e}")
             import traceback
@@ -313,11 +333,19 @@ class FactIndexer:
 
         logger.info(f"[FactIndexer] Inserting {len(points_to_upsert)} points into Qdrant...")
 
+        # 报告生成完成进度 (60%)
+        if progress_callback:
+            progress_callback(2, total_steps)
+
         # Batch upsert
         upsert_batch = 100
-        for i in tqdm(range(0, len(points_to_upsert), upsert_batch), desc="Upserting"):
-            batch = points_to_upsert[i:i+upsert_batch]
+        total_upserts = (len(points_to_upsert) + upsert_batch - 1) // upsert_batch
+        for i, idx in enumerate(tqdm(range(0, len(points_to_upsert), upsert_batch), desc="Upserting")):
+            batch = points_to_upsert[idx:idx+upsert_batch]
             self.client.upsert(collection_name=self.collection_name, points=batch)
+            # 报告Upsert进度 (60% -> 100%)
+            if progress_callback:
+                progress_callback(2 + int((i / total_upserts) * 1), total_steps)
 
         logger.info("[FactIndexer] Indexing complete.")
         # Rebuild BM25 after indexing

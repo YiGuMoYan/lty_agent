@@ -47,6 +47,10 @@ EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1024"))
 EMBEDDING_LOCAL_PATH = os.getenv("EMBEDDING_LOCAL_PATH", os.path.join(BASE_DIR, "models", "Xorbits", "bge-m3"))
 EMBEDDING_BATCH_SIZE = int(os.getenv("EMBEDDING_BATCH_SIZE", "16"))
 
+# Agent Config - Conversation History
+MAX_HISTORY_TURNS = int(os.getenv("MAX_HISTORY_TURNS", "30"))
+FLUSH_THRESHOLD = int(os.getenv("FLUSH_THRESHOLD", "5"))
+
 # TTS (Text-to-Speech) Config
 TTS_SERVER = os.getenv("TTS_SERVER", "http://cosyvoice-lty-dzxzbwpnzo.cn-hangzhou.fcapp.run")
 TTS_ENABLED = os.getenv("TTS_ENABLED", "True").lower() == "true"

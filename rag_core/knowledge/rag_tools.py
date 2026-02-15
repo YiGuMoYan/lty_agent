@@ -1,24 +1,27 @@
 import json
 import re  # Added for keyword extraction
 import concurrent.futures
+import threading
+from pathlib import Path
 from .indexing.lyrics_indexer import LyricsIndexer
 from .indexing.fact_indexer import FactIndexer
 from .indexing.graph_indexer import GraphIndexer
 from rag_core.utils.logger import logger
 
-# 同义词映射表
-SYNONYM_MAP = {
-    "你": ["洛天依", "天依"],
-    "我": ["使用者", "用户"],
-    "歌": ["歌曲", "音乐", "作品"],
-    "作曲": ["写", "创作"],
-    "演唱": ["唱"],
-    "谁": ["哪个人", "何人"],
-    "什么": ["哪个", "啥"],
-    "什么时候": ["何时", "啥时候"],
-    "怎么样": ["如何", "啥样"],
-    "为什么": ["为何", "咋回事"],
-}
+
+def _load_synonym_map() -> dict:
+    """从 JSON 配置文件加载同义词映射"""
+    config_path = Path(__file__).parent.parent.parent / "config" / "synonym_map.json"
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.warning(f"加载同义词映射失败: {e}, 使用默认空映射")
+        return {}
+
+
+# 同义词映射表 (从配置文件加载)
+SYNONYM_MAP = _load_synonym_map()
 
 # 来源权重
 SOURCE_WEIGHTS = {
@@ -32,40 +35,49 @@ _lyrics_idx = None
 _fact_idx = None
 _graph_idx = None
 _rewriter = None
+_index_lock = threading.Lock()
 
 def get_query_rewriter():
     global _rewriter
     if _rewriter is None:
-        from rag_core.routers.query_rewriter import QueryRewriter
-        _rewriter = QueryRewriter()
+        with _index_lock:
+            if _rewriter is None:
+                from rag_core.routers.query_rewriter import QueryRewriter
+                _rewriter = QueryRewriter()
     return _rewriter
 
 
 def get_lyrics_indexer():
     global _lyrics_idx
     if _lyrics_idx is None:
-        _lyrics_idx = LyricsIndexer()
+        with _index_lock:
+            if _lyrics_idx is None:
+                _lyrics_idx = LyricsIndexer()
     return _lyrics_idx
 
 def get_graph_indexer():
     global _graph_idx
     if _graph_idx is None:
-        _graph_idx = GraphIndexer()
+        with _index_lock:
+            if _graph_idx is None:
+                _graph_idx = GraphIndexer()
     return _graph_idx
 
 def get_fact_indexer():
     global _fact_idx
     if _fact_idx is None:
-        _fact_idx = FactIndexer()
-        # --- Commercial Robustness: Startup Index Check ---
-        try:
-            if _fact_idx.count() == 0:
-                logger.info("[RAG Tools] Initializing Vector DB for the first time...")
-                _fact_idx.index_knowledge_base()
-            else:
-                logger.info(f"[RAG Tools] Vector DB ready ({_fact_idx.count()} chunks). Use scripts to refresh.")
-        except Exception as e:
-            logger.warning(f"[RAG Tools] Auto-indexing warning: {e}")
+        with _index_lock:
+            if _fact_idx is None:
+                _fact_idx = FactIndexer()
+                # --- Commercial Robustness: Startup Index Check ---
+                try:
+                    if _fact_idx.count() == 0:
+                        logger.info("[RAG Tools] Initializing Vector DB for the first time...")
+                        _fact_idx.index_knowledge_base()
+                    else:
+                        logger.info(f"[RAG Tools] Vector DB ready ({_fact_idx.count()} chunks). Use scripts to refresh.")
+                except Exception as e:
+                    logger.warning(f"[RAG Tools] Auto-indexing warning: {e}")
     return _fact_idx
 
 # --- Helper Functions ---

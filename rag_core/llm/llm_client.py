@@ -1,5 +1,6 @@
 import os
 import asyncio
+import time
 from enum import Enum
 from typing import Optional, List, Dict, Any
 from openai import AsyncOpenAI
@@ -25,7 +26,7 @@ class LLMError(Exception):
 class LLMClient:
     """
     LLM 客户端 - 单例模式
-    支持重试机制、错误分类、连接复用
+    支持重试机制、错误分类、连接复用、熔断机制
     """
     _instance: Optional['LLMClient'] = None
     _initialized: bool = False
@@ -33,6 +34,14 @@ class LLMClient:
     # 重试配置
     MAX_RETRIES = 3
     RETRY_DELAYS = [2, 4, 8]  # 指数退避（秒）
+
+    # 熔断器配置
+    CIRCUIT_THRESHOLD = 3  # 连续失败次数阈值
+    CIRCUIT_TIMEOUT = 60   # 熔断时间（秒）
+    _circuit_failures = 0       # 连续失败计数
+    _circuit_last_failure = 0  # 上次失败时间
+    _circuit_broken = False     # 熔断状态
+    _circuit_lock = None        # 熔断状态锁（异步安全）
 
     def __new__(cls):
         if cls._instance is None:
@@ -43,6 +52,9 @@ class LLMClient:
         # 避免重复初始化
         if LLMClient._initialized:
             return
+
+        # 初始化熔断锁
+        LLMClient._circuit_lock = asyncio.Lock()
 
         self.model_name = config.CHAT_MODEL_NAME
         self.base_url = config.CHAT_API_BASE
@@ -94,6 +106,35 @@ class LLMClient:
             LLMErrorType.API_ERROR
         ]
 
+    async def _check_circuit(self):
+        """检查熔断器状态"""
+        async with LLMClient._circuit_lock:
+            if LLMClient._circuit_broken:
+                # 检查是否超过熔断时间
+                if time.time() - LLMClient._circuit_last_failure >= LLMClient.CIRCUIT_TIMEOUT:
+                    logger.info("[LLMClient] Circuit breaker recovered, resetting failures")
+                    LLMClient._circuit_broken = False
+                    LLMClient._circuit_failures = 0
+                else:
+                    raise LLMError(
+                        f"LLM circuit broken, please retry later (timeout: {int(LLMClient.CIRCUIT_TIMEOUT - (time.time() - LLMClient._circuit_last_failure))}s)",
+                        LLMErrorType.API_ERROR,
+                        is_retryable=False
+                    )
+
+    def _record_failure(self):
+        """记录失败，更新熔断状态"""
+        LLMClient._circuit_failures += 1
+        LLMClient._circuit_last_failure = time.time()
+
+        if LLMClient._circuit_failures >= LLMClient.CIRCUIT_THRESHOLD:
+            LLMClient._circuit_broken = True
+            logger.warning(f"[LLMClient] Circuit breaker triggered after {LLMClient._circuit_failures} failures")
+
+    def _record_success(self):
+        """记录成功，重置熔断状态"""
+        LLMClient._circuit_failures = 0
+
     async def _retry_request(self, request_func, *args, **kwargs):
         """带重试的请求执行"""
         last_error = None
@@ -131,8 +172,11 @@ class LLMClient:
     async def chat_with_tools(self, messages, tools=None, tool_choice="auto"):
         """
         Chat completion with optional tool calling (Async).
-        支持重试机制
+        支持重试机制和熔断机制
         """
+        # 检查熔断器
+        await self._check_circuit()
+
         async def _make_request():
             try:
                 response = await self.client.chat.completions.create(
@@ -150,15 +194,24 @@ class LLMClient:
                 raise LLMError(f"Chat completion failed: {e}", error_type)
 
         try:
-            return await self._retry_request(_make_request)
+            result = await self._retry_request(_make_request)
+            # 请求成功，重置熔断状态
+            self._record_success()
+            return result
         except LLMError as e:
+            # 请求失败，记录熔断
+            self._record_failure()
             logger.error(f"[LLMClient] Final error: {e.message}")
             return None
 
     async def chat(self, messages, temperature=None):
         """
         简单聊天接口（无工具调用）
+        支持熔断机制
         """
+        # 检查熔断器
+        await self._check_circuit()
+
         async def _make_request():
             try:
                 response = await self.client.chat.completions.create(
@@ -174,7 +227,11 @@ class LLMClient:
 
         try:
             result = await self._retry_request(_make_request)
+            # 请求成功，重置熔断状态
+            self._record_success()
             return result if result else "（数据流中断...）"
         except LLMError as e:
+            # 请求失败，记录熔断
+            self._record_failure()
             logger.error(f"[LLMClient] Final error: {e.message}")
             return "（服务暂时不可用，请稍后再试...）"

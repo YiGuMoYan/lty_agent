@@ -57,6 +57,89 @@ async def shutdown_event():
 # ... (rest of the file)
 
 
+@app.get("/health")
+async def health_check():
+    """健康检查端点 - 检查核心服务状态"""
+    health_status = {
+        "status": "healthy",
+        "timestamp": time.time(),
+        "services": {}
+    }
+    
+    # 1. 检查 LLM 连接
+    try:
+        from rag_core.llm.llm_client import LLMClient
+        client = LLMClient.get_instance()
+        # 简单检查 client 是否可初始化
+        health_status["services"]["llm"] = "ok"
+    except Exception as e:
+        health_status["services"]["llm"] = f"error: {str(e)}"
+        health_status["status"] = "degraded"
+    
+    # 2. 检查向量数据库
+    try:
+        from rag_core.knowledge.rag_tools import get_fact_indexer
+        idx = get_fact_indexer()
+        count = idx.count()
+        health_status["services"]["vector_db"] = f"ok (chunks: {count})"
+    except Exception as e:
+        health_status["services"]["vector_db"] = f"error: {str(e)}"
+        health_status["status"] = "degraded"
+    
+    # 3. 检查 TTS 服务
+    if TTS_ENABLED:
+        if tts_client is not None:
+            health_status["services"]["tts"] = "ok"
+        else:
+            health_status["services"]["tts"] = "not initialized"
+    else:
+        health_status["services"]["tts"] = "disabled"
+    
+    # 4. 检查 Qdrant 连接
+    try:
+        from rag_core.knowledge.indexing.fact_indexer import get_qdrant_client
+        qdrant = get_qdrant_client()
+        # 尝试获取 collections
+        collections = qdrant.get_collections()
+        health_status["services"]["qdrant"] = f"ok (collections: {len(collections.collections)})"
+    except Exception as e:
+        health_status["services"]["qdrant"] = f"error: {str(e)}"
+        health_status["status"] = "degraded"
+    
+    return health_status
+
+
+@app.get("/ready")
+async def readiness_check():
+    """就绪检查端点 - 检查服务是否可接收请求"""
+    ready = True
+    not_ready_reasons = []
+    
+    # 检查 LLM 是否可用
+    try:
+        from rag_core.llm.llm_client import LLMClient
+        client = LLMClient.get_instance()
+    except Exception as e:
+        ready = False
+        not_ready_reasons.append(f"LLM: {str(e)}")
+    
+    # 检查向量数据库是否有数据
+    try:
+        from rag_core.knowledge.rag_tools import get_fact_indexer
+        idx = get_fact_indexer()
+        if idx.count() == 0:
+            ready = False
+            not_ready_reasons.append("Vector DB empty - not indexed")
+    except Exception as e:
+        ready = False
+        not_ready_reasons.append(f"Vector DB: {str(e)}")
+    
+    return {
+        "ready": ready,
+        "reasons": not_ready_reasons if not ready else ["all systems ready"]
+    }
+
+
 @app.get("/")
 async def root():
     return RedirectResponse(url="/viewer")
@@ -72,16 +155,17 @@ async def viewer():
 
 
 @app.websocket("/ws/chat")
-async def ws_chat(websocket: WebSocket):
+async def ws_chat(websocket: WebSocket, user_id: str = None):
     await websocket.accept()
 
     # 为每个连接分配独立的 session 和 agent（启用统一生成）
-    session_id = session_manager.create_session()
+    # 使用传入的 user_id 或生成临时ID
+    session_id = session_manager.create_session(user_id=user_id)
     agent = session_manager.get_agent(session_id)
     if hasattr(agent, "initialize"):
         await agent.initialize()
 
-    logger.info(f"[WS] 新连接: {session_id}, 当前活跃会话: {len(session_manager.sessions)}")
+    logger.info(f"[WS] 新连接: {session_id}, user_id: {user_id or session_id}, 当前活跃会话: {len(session_manager.sessions)}")
 
     try:
         while True:

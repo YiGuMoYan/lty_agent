@@ -5,10 +5,23 @@
 """
 
 import json
+import os
 from typing import Dict, List, Optional
 from dataclasses import dataclass
 from rag_core.llm.llm_client import LLMClient
 from rag_core.utils.logger import logger
+
+
+def load_emotion_keywords() -> dict:
+    """从 JSON 配置文件加载情感词典"""
+    config_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+        "config",
+        "emotion_keywords.json"
+    )
+    with open(config_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
 
 # 快速路径置信度阈值
 KEYWORD_HIGH_CONFIDENCE_THRESHOLD = 0.8
@@ -32,30 +45,11 @@ class EmotionalRouter:
         self._init_emotion_lexicon()
 
     def _init_emotion_lexicon(self):
-        """初始化情感词典"""
-        self.emotion_keywords = {
-            "开心": ["开心", "快乐", "高兴", "兴奋", "愉快", "欢乐", "喜悦", "满足", "幸福", "乐", "哈哈", "嘻嘻", "哇", "好耶", "太好了"],
-            "难过": ["难过", "伤心", "悲伤", "沮丧", "失落", "郁闷", "痛苦", "哭", "眼泪", "呜呜", "唉", "心碎", "难受"],
-            "焦虑": ["焦虑", "紧张", "担心", "害怕", "恐惧", "不安", "压力", "烦躁", "忐忑", "慌", "怕", "失眠"],
-            "孤独": ["孤独", "寂寞", "一个人", "孤单", "没人", "冷清", "无聊", "空虚", "没人陪", "自己"],
-            "愤怒": ["生气", "愤怒", "恼火", "气愤", "火大", "不爽", "烦", "气", "恨", "讨厌"],
-            "疲惫": ["累", "疲惫", "疲倦", "困", "疲劳", "没精神", "乏力", "筋疲力尽", "困死了", "好累"],
-            "困惑": ["困惑", "迷茫", "不知道", "不明白", "疑惑", "疑问", "糊涂", "搞不懂", "怎么办"],
-        }
-
-        self.intensity_indicators = {
-            "high": ["非常", "特别", "超级", "极其", "真的", "太", "超", "爆", "绝了", "max", "快要", "简直"],
-            "medium": ["比较", "还算", "挺", "蛮", "略微", "有点", "一些"],
-            "low": ["一点", "稍微", "不太", "不怎么", "略微"]
-        }
-
-        # 纯情感倾诉表达
-        self._pure_emotional_phrases = [
-            "陪陪我", "好难受", "想哭", "受不了了", "好想哭",
-            "心好累", "好烦", "好孤独", "好寂寞", "抱抱我",
-            "安慰我", "我好难过", "我好累", "我好烦", "好累啊",
-            "不想说话", "心情不好", "郁闷", "烦死了", "孤独寂寞",
-        ]
+        """从配置文件加载情感词典"""
+        emotion_config = load_emotion_keywords()
+        self.emotion_keywords = emotion_config["emotion_keywords"]
+        self.intensity_indicators = emotion_config["intensity_indicators"]
+        self._pure_emotional_phrases = emotion_config["pure_emotional_phrases"]
 
     async def analyze_emotion(self, user_input: str, history: Optional[List[Dict]] = None) -> EmotionState:
         """

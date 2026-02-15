@@ -13,8 +13,10 @@ import numpy as np
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta
+from collections import OrderedDict
 from rag_core.routers.emotional_router import EmotionState
 from rag_core.utils.logger import logger
+from config import FLUSH_THRESHOLD
 
 
 # 模块级 embedding 函数缓存
@@ -128,13 +130,54 @@ class EmotionalMemory:
         # 批量更新机制
         self._profile_dirty = False  # 标记是否有未保存的更改
         self._update_counter = 0  # 更新计数器
-        self._flush_threshold = 5  # 每5次更新写一次DB
+        self._flush_threshold = FLUSH_THRESHOLD  # 可配置的刷新阈值
+
+        # Embedding 缓存 (LRU)
+        self._embedding_cache = OrderedDict()
+        self._embedding_cache_size = 100
 
         self._initialized = False
 
     def _get_embedding_fn(self):
         """获取 embedding 函数（使用全局缓存）"""
         return _get_global_embedding_function()
+
+    def _get_embedding_cached(self, text: str) -> Optional[List[float]]:
+        """
+        带缓存的 embedding 计算 (LRU)
+
+        Args:
+            text: 要计算 embedding 的文本
+
+        Returns:
+            embedding 向量列表 or None (计算失败时)
+        """
+        text_hash = hash(text)
+
+        # 检查缓存
+        if text_hash in self._embedding_cache:
+            # 移到末尾（LRU）
+            self._embedding_cache.move_to_end(text_hash)
+            logger.debug(f"[EmotionalMemory] Embedding cache hit: {text[:20]}...")
+            return self._embedding_cache[text_hash]
+
+        # 计算 embedding
+        try:
+            embedding_fn = self._get_embedding_fn()
+            embedding = embedding_fn([text])[0]
+
+            # 添加到缓存
+            self._embedding_cache[text_hash] = embedding
+
+            # 限制缓存大小 (LRU 淘汰)
+            if len(self._embedding_cache) > self._embedding_cache_size:
+                self._embedding_cache.popitem(last=False)
+
+            logger.debug(f"[EmotionalMemory] Computed and cached embedding: {text[:20]}...")
+            return embedding
+        except Exception as e:
+            logger.warning(f"[EmotionalMemory] Failed to compute embedding: {e}")
+            return None
 
     async def initialize(self):
         """Asynchronous initialization of database and profile"""
@@ -426,15 +469,14 @@ class EmotionalMemory:
             interaction_quality=interaction_quality,
         )
 
-        # 计算 embedding (用于语义检索)
+        # 计算 embedding (用于语义检索) - 使用缓存避免重复计算
         embedding_bytes = None
         try:
-            embedding_fn = self._get_embedding_fn()
-            # 使用 user_input 作为检索向量
-            embedding_vec = embedding_fn([user_input])[0]
-            # 转换为 bytes 存储
-            embedding_bytes = np.array(embedding_vec, dtype=np.float32).tobytes()
-            logger.debug(f"[EmotionalMemory] Computed embedding for user_input: {user_input[:20]}...")
+            embedding_vec = self._get_embedding_cached(user_input)
+            if embedding_vec:
+                # 转换为 bytes 存储
+                embedding_bytes = np.array(embedding_vec, dtype=np.float32).tobytes()
+                logger.debug(f"[EmotionalMemory] Computed/Cached embedding for user_input: {user_input[:20]}...")
         except Exception as e:
             logger.warning(f"[EmotionalMemory] Failed to compute embedding: {e}")
 
@@ -652,11 +694,13 @@ class EmotionalMemory:
         Returns:
             List[EmotionalMemoryEntry]: 按语义相似度排序的记忆列表
         """
-        # 计算查询的 embedding
+        # 计算查询的 embedding - 使用缓存避免重复计算
         query_embedding = None
         try:
-            embedding_fn = self._get_embedding_fn()
-            query_embedding = embedding_fn([query])[0]
+            query_embedding = self._get_embedding_cached(query)
+            if query_embedding is None:
+                # 回退到时间检索
+                return await self.get_emotional_history(days=days)
         except Exception as e:
             logger.warning(f"[EmotionalMemory] Failed to compute query embedding: {e}")
             # 回退到时间检索

@@ -302,38 +302,89 @@ class UnifiedResponseGenerator:
 
     def _evaluate_quality(self, text: str, emotion: str) -> float:
         """
-        简单质量评估：检查生成文本是否符合基本要求
+        增强质量评估：多维度检查生成文本质量
         返回分数 0.0 - 1.0
         """
-        score = 1.0
+        quality_score = 1.0
 
-        # 1. 长度检查：过短或过长都扣分
-        length = len(text)
-        if length < 5:
-            score -= 0.3  # 太短
-        elif length > 500:
-            score -= 0.1  # 太长
+        # 1. 禁止词/模式检查
+        forbidden_words = ["敏感词1", "敏感词2", "根据记忆显示", "根据资料显示",
+                          "搜索结果显示", "数据显示", "（）", "（"]
+        for word in forbidden_words:
+            if word in text:
+                quality_score -= 0.3
 
-        # 2. 检查是否包含禁止的模式
-        forbidden_patterns = [
-            "根据记忆显示",
-            "根据资料显示",
-            "搜索结果显示",
-            "数据显示",
-            "（）",  # 括号动作描写
-            "（",  # 左括号（可能是动作描写
-        ]
-        for pattern in forbidden_patterns:
-            if pattern in text:
-                score -= 0.2
-                if score < 0:
-                    return 0.0
-
-        # 3. 检查重复词（简单的重复检测）
+        # 2. 重复词检查（词汇多样性）
         words = text.split()
-        if len(words) > 10:
-            unique_words = set(words)
-            if len(unique_words) / len(words) < 0.3:  # 重复词太多
-                score -= 0.2
+        if len(words) > 5:
+            unique_ratio = len(set(words)) / len(words)
+            quality_score -= (1 - unique_ratio) * 0.3
 
-        return max(0.0, min(1.0, score))
+        # 3. 长度检查
+        if len(text) < 5:
+            quality_score -= 0.4
+        elif len(text) > 500:
+            quality_score -= 0.15
+        elif len(text) < 10:
+            quality_score -= 0.2
+
+        # 4. 字符多样性检查
+        if len(text) > 0:
+            unique_chars = len(set(text))
+            char_ratio = unique_chars / max(len(text), 1)
+            if char_ratio < 0.1:
+                quality_score -= 0.25
+            elif char_ratio < 0.15:
+                quality_score -= 0.1
+
+        # 5. 语义重复检查（连续重复词组）
+        quality_score -= self._check_semantic_repetition(text)
+
+        # 6. JSON格式验证（内部检查）
+        quality_score -= self._check_json_structure_quality(text)
+
+        # 7. 标点符号检查（过少说明不自然）
+        punctuation_count = sum(1 for c in text if c in '，。！？；：""''（）')
+        if len(text) > 20 and punctuation_count < 1:
+            quality_score -= 0.15
+
+        # 8. 数字和字母占比检查（过多可能不正常）
+        alpha_digit_count = sum(1 for c in text if c.isdigit() or c.isalpha())
+        if len(text) > 0:
+            alpha_digit_ratio = alpha_digit_count / len(text)
+            if alpha_digit_ratio > 0.5:
+                quality_score -= 0.2
+
+        return max(0.0, min(1.0, quality_score))
+
+    def _check_semantic_repetition(self, text: str) -> float:
+        """检查语义重复，检测连续重复的词组"""
+        penalty = 0.0
+        # 检查连续3个词是否重复
+        words = text.split()
+        for i in range(len(words) - 2):
+            if words[i] == words[i+1] == words[i+2]:
+                penalty += 0.3
+        # 检查n-gram重复（2-gram和3-gram）
+        if len(words) >= 4:
+            bigrams = [tuple(words[i:i+2]) for i in range(len(words)-1)]
+            unique_bigrams = set(bigrams)
+            if len(bigrams) > 0 and len(unique_bigrams) / len(bigrams) < 0.3:
+                penalty += 0.2
+        return penalty
+
+    def _check_json_structure_quality(self, text: str) -> float:
+        """检查JSON格式的结构质量"""
+        penalty = 0.0
+        # 检查是否包含无效的JSON片段
+        if text.count('{') != text.count('}'):
+            penalty += 0.3
+        if text.count('[') != text.count(']'):
+            penalty += 0.3
+        # 检查是否有未闭合的引号
+        if text.count('"') % 2 != 0:
+            penalty += 0.2
+        # 检查是否有明显的JSON残片（如单独的 "key": 或 , }）
+        if '": ' in text and '{' not in text and '}' not in text:
+            penalty += 0.15
+        return penalty

@@ -1,5 +1,7 @@
 import json
 import time
+from datetime import datetime
+from pathlib import Path
 from typing import Optional, Dict, Any, List
 from rag_core.llm.llm_client import LLMClient
 from rag_core.knowledge.rag_tools import TOOLS_SCHEMA
@@ -8,12 +10,40 @@ from rag_core.utils.logger import logger
 # 意图缓存配置
 INTENT_CACHE_TTL = 300  # 5分钟
 INTENT_CACHE_MAX_SIZE = 100
+CACHE_FILE = "data/intent_cache.json"
 
 class IntentCache:
     """意图路由缓存"""
     def __init__(self):
         self._cache: Dict[str, Dict[str, Any]] = {}
         self._timestamps: Dict[str, float] = {}
+        self._load_cache()
+
+    def _load_cache(self):
+        """从文件加载缓存"""
+        cache_file = Path(CACHE_FILE)
+        if cache_file.exists():
+            try:
+                with open(cache_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    self._cache = data.get("cache", {})
+                    self._timestamps = data.get("timestamps", {})
+                logger.info(f"[IntentCache] Loaded {len(self._cache)} cached entries")
+            except Exception as e:
+                logger.warning(f"[IntentCache] Failed to load cache: {e}")
+
+    def _save_cache(self):
+        """保存缓存到文件"""
+        cache_file = Path(CACHE_FILE)
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(cache_file, "w", encoding="utf-8") as f:
+                json.dump({
+                    "cache": self._cache,
+                    "timestamps": self._timestamps
+                }, f, ensure_ascii=False)
+        except Exception as e:
+            logger.warning(f"[IntentCache] Failed to save cache: {e}")
 
     def _normalize_query(self, query: str) -> str:
         """标准化查询，用于缓存匹配"""
@@ -67,6 +97,7 @@ class IntentCache:
         key = self._normalize_query(query)
         self._cache[key] = result
         self._timestamps[key] = time.time()
+        self._save_cache()
 
 # 全局缓存实例
 _intent_cache = IntentCache()
@@ -112,9 +143,8 @@ class IntentRouter:
         Returns:
             Optional[Dict[str, Any]]: 路由结果，包含 tool 和 args
         """
-        import datetime
-        current_date_str = datetime.datetime.now().strftime("%Y-%m-%d")
-        current_year = datetime.datetime.now().year
+        current_date_str = datetime.now().strftime("%Y-%m-%d")
+        current_year = datetime.now().year
 
         # Build Context String from last 5 turns
         context_str = "None"
@@ -132,7 +162,7 @@ class IntentRouter:
             "3. DO NOT TRANSLATE Chinese entity names.\n"
             "4. 'who wrote'/'lyrics' -> 'search_lyrics'.\n"
             "5. 'Tell me more'/'context'/'meaning' -> 'search_knowledge_base'.\n"
-            "6. 'concert'/'tour'/'event' OR queries with TIME (last year, 2025) -> 'query_knowledge_graph'.\n"
+            "6. 'concert'/'tour'/'event' OR queries with TIME (last year, this year) -> 'query_knowledge_graph'.\n"
             "7. Resolve relative time: 'last year' -> {current_year - 1}; 'this year' -> {current_year}.\n"
             "8. If no tool needed -> {\"tool\": null}.\n\n"
             f"Recent History: {context_str}\n\n"

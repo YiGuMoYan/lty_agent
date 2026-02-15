@@ -1,8 +1,7 @@
-
 import json
 import os
 import asyncio
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Callable
 import jieba
 from rank_bm25 import BM25Okapi
 import numpy as np
@@ -49,11 +48,27 @@ class LyricsIndexer:
         # Use simple precise mode
         return list(jieba.cut(text))
 
-    def build_index(self):
-        """Build BM25 index from lyrics."""
+    def build_index(self, progress_callback: Callable[[int, int], None] = None):
+        """Build BM25 index from lyrics.
+
+        Args:
+            progress_callback: 进度回调函数，签名为 callback(current, total)
+        """
         logger.info("[LyricsIndexer] Building BM25 index...")
-        self.tokenized_corpus = [self._tokenize(song.get('lyrics', '')) for song in self.songs]
+        total = len(self.songs)
+
+        self.tokenized_corpus = []
+        for i, song in enumerate(self.songs):
+            self.tokenized_corpus.append(self._tokenize(song.get('lyrics', '')))
+            # 报告进度
+            if progress_callback and i % 100 == 0:
+                progress_callback(i, total)
+
         self.bm25 = BM25Okapi(self.tokenized_corpus)
+
+        if progress_callback:
+            progress_callback(total, total)
+
         logger.info("[LyricsIndexer] Index built successfully.")
 
     def search_lyrics(self, query, top_k=3):

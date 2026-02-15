@@ -313,7 +313,10 @@ class Live2DParamGenerator:
         """静态映射作为 fallback（增强版）"""
         from emotion_live2d_map import get_live2d_params
 
-        logger.info(f"[Live2DGen] 使用静态映射: {emotion} @ {intensity:.2f}")
+        # 记录输入参数
+        logger.info(f"[Live2D] [Fallback] 开始生成 - emotion: {emotion}, intensity: {intensity:.2f}")
+        logger.debug(f"[Live2D] [Fallback] 回复文本: {reply_text[:50]}...")
+
         static_result = get_live2d_params(emotion, intensity)
 
         # 为静态结果添加随机性
@@ -322,37 +325,58 @@ class Live2DParamGenerator:
         # 添加随机眼球方向（避免总是看正前方）
         if "ParamEyeBallX" not in params or params["ParamEyeBallX"] == 0:
             params["ParamEyeBallX"] = random.uniform(-0.4, 0.4)
+            logger.debug(f"[Live2D] [Fallback] 添加随机 ParamEyeBallX: {params['ParamEyeBallX']:.3f}")
         if "ParamEyeBallY" not in params or params["ParamEyeBallY"] == 0:
             params["ParamEyeBallY"] = random.uniform(-0.3, 0.3)
+            logger.debug(f"[Live2D] [Fallback] 添加随机 ParamEyeBallY: {params['ParamEyeBallY']:.3f}")
 
         # 添加随机头部角度微调
-        params["ParamAngleZ"] = params.get("ParamAngleZ", 0) + random.uniform(-5, 5)
+        angle_z_variation = random.uniform(-5, 5)
+        params["ParamAngleZ"] = params.get("ParamAngleZ", 0) + angle_z_variation
+        logger.debug(f"[Live2D] [Fallback] 头部角度微调: {angle_z_variation:.3f}")
 
         # 根据语义选择姿势
         pose = self._infer_pose_from_text(reply_text, emotion)
 
-        return {
+        # 记录输出结果
+        result = {
             "params": params,
             "pose": pose or static_result.get("pose"),
             "action_sequence": []
         }
+        non_zero_params = {k: round(v, 3) for k, v in params.items() if v != 0}
+        logger.info(f"[Live2D] [Fallback] 生成完成 - params keys: {list(params.keys())}")
+        logger.debug(f"[Live2D] [Fallback] 非零参数: {non_zero_params}")
+        if result.get("pose"):
+            logger.info(f"[Live2D] [Fallback] 姿势: {result['pose']}")
+        else:
+            logger.debug(f"[Live2D] [Fallback] 无姿势")
+
+        return result
 
     def _infer_pose_from_text(self, text: str, emotion: str) -> Optional[str]:
         """从文本推断合适的姿势"""
         text_lower = text.lower()
+        logger.debug(f"[Live2D] [Pose Inference] 开始推断 - text: {text[:30]}..., emotion: {emotion}")
 
         # 关键词匹配
         if any(kw in text_lower for kw in ["你好", "嗨", "hi", "hello", "再见", "拜拜"]):
+            logger.debug(f"[Live2D] [Pose Inference] 匹配关键词: 问候 -> ParamPOSE2")
             return "ParamPOSE2"
         if any(kw in text_lower for kw in ["嘿嘿", "害羞", "不好意思", "///", "脸红"]):
+            logger.debug(f"[Live2D] [Pose Inference] 匹配关键词: 害羞 -> ParamPOSE5")
             return "ParamPOSE5"
         if any(kw in text_lower for kw in ["想想", "思考", "让我", "考虑", "嗯..."]):
+            logger.debug(f"[Live2D] [Pose Inference] 匹配关键词: 思考 -> ParamPOSE4")
             return "ParamPOSE4"
         if any(kw in text_lower for kw in ["太棒", "好耶", "太好了", "开心", "耶"]):
+            logger.debug(f"[Live2D] [Pose Inference] 匹配关键词: 兴奋 -> ParamPOSE6")
             return "ParamPOSE6"
         if any(kw in text_lower for kw in ["算了", "唉", "没办法", "无奈"]):
+            logger.debug(f"[Live2D] [Pose Inference] 匹配关键词: 无奈 -> ParamPOSE7")
             return "ParamPOSE7"
         if any(kw in text_lower for kw in ["当然", "必须", "就是", "没错", "得意"]):
+            logger.debug(f"[Live2D] [Pose Inference] 匹配关键词: 得意 -> ParamPOSE8")
             return "ParamPOSE8"
 
         # 根据情绪随机选择
@@ -364,7 +388,11 @@ class Live2DParamGenerator:
         }
         pose_options = EMOTION_POSE_OPTIONS.get(emotion, [])
         if pose_options:
-            return random.choice(pose_options)
+            selected_pose = random.choice(pose_options)
+            logger.debug(f"[Live2D] [Pose Inference] 情绪匹配 - emotion: {emotion} -> {selected_pose}")
+            return selected_pose
+
+        logger.debug(f"[Live2D] [Pose Inference] 无匹配姿势，返回 None")
         return None
 
     def _validate_and_clamp(self, result: Dict[str, Any]) -> Optional[Dict[str, Any]]:

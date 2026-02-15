@@ -2,7 +2,7 @@
 import json
 import os
 import asyncio
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Callable
 import networkx as nx
 import pickle
 import difflib  # For fuzzy matching
@@ -26,23 +26,29 @@ class GraphIndexer:
         else:
             logger.warning(f"[GraphIndexer] Warning: Taxonomy file not found at {self.topics_path}")
 
-    def build_graph(self):
-        """Build graph from topics_master.json."""
+    def build_graph(self, progress_callback: Callable[[int, int], None] = None):
+        """Build graph from topics_master.json.
+
+        Args:
+            progress_callback: 进度回调函数，签名为 callback(current, total)
+        """
         logger.info("[GraphIndexer] Building knowledge graph...")
         try:
             with open(self.topics_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-                
+
             # Iterate categories
             # Original structure is {"taxonomy": [{"category": "...", "subtopics": []}]}
             items = data.get("taxonomy", [])
-            for entry in items:
+            total_items = len(items)
+
+            for entry_idx, entry in enumerate(items):
                 category = entry.get("category")
                 subtopics = entry.get("subtopics")
-                
+
                 cat_node = f"Category:{category}"
                 self.graph.add_node(cat_node, type="Category")
-                
+
                 if isinstance(subtopics, list):
                     for item in subtopics:
                         if isinstance(item, str):
@@ -51,7 +57,14 @@ class GraphIndexer:
                         elif isinstance(item, dict):
                             # Complex timeline object or other struct
                             self._parse_complex_item(item, category)
-                            
+
+                # 报告进度
+                if progress_callback and entry_idx % 10 == 0:
+                    progress_callback(entry_idx, total_items)
+
+            if progress_callback:
+                progress_callback(total_items, total_items)
+
             logger.info(f"[GraphIndexer] Graph built. Nodes: {self.graph.number_of_nodes()}, Edges: {self.graph.number_of_edges()}")
             
         except Exception as e:

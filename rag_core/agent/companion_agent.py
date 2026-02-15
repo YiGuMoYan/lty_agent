@@ -11,7 +11,21 @@ from rag_core.generation.unified_generator import UnifiedResponseGenerator
 from rag_core.generation.response_style import StyleManager, ResponseStyle, parse_style_from_string
 from rag_core.agent.rag_orchestrator import RagOrchestrator
 from emotion_live2d_map import Live2DSmoother
-from config import PROMPT_PATH, DEFAULT_RESPONSE_STYLE
+from config import PROMPT_PATH, DEFAULT_RESPONSE_STYLE, MAX_HISTORY_TURNS
+
+# tiktoken tokenizer 单例
+_tokenizer = None
+
+def _get_tokenizer():
+    """获取tokenizer单例"""
+    global _tokenizer
+    if _tokenizer is None:
+        try:
+            import tiktoken
+            _tokenizer = tiktoken.get_encoding("cl100k_base")
+        except Exception:
+            _tokenizer = None
+    return _tokenizer
 
 class CompanionAgent:
     # 用户情感 → 回复语气指令映射（天依应该用什么语气回应）
@@ -26,10 +40,11 @@ class CompanionAgent:
         "平静": "用平静温柔的语气说这句话",
     }
 
-    MAX_HISTORY_TURNS = 30 # Increased for rolling summary buffer
+    MAX_HISTORY_TURNS = MAX_HISTORY_TURNS  # 可配置的历史轮数
     MAX_TOKENS = 4000  # 最大 token 数限制
 
-    def __init__(self, use_emotional_mode=True, style: Optional[str] = None, use_unified_generator=True):
+    def __init__(self, user_id: str = None, use_emotional_mode=True, style: Optional[str] = None, use_unified_generator=True):
+        self.user_id = user_id or "default_user"
         self.client = LLMClient.get_instance()
         self.live2d_generator = Live2DParamGenerator()
         self.use_emotional_mode = use_emotional_mode
@@ -56,7 +71,7 @@ class CompanionAgent:
         self.style_manager = StyleManager(default_style=initial_style)
 
         if use_emotional_mode:
-            self.emotional_memory = EmotionalMemory()
+            self.emotional_memory = EmotionalMemory(user_id=self.user_id)
         else:
             self.emotional_memory = None
 
@@ -238,10 +253,18 @@ class CompanionAgent:
             logger.error(f"滚动总结失败: {e}")
 
     def _estimate_tokens(self, text: str) -> int:
-        """简单估算 token 数量（中英文混合估算）"""
+        """估算token数量"""
         if not text:
             return 0
-        # 简单估算：中文约每字2token，英文约每4字符1token
+
+        tokenizer = _get_tokenizer()
+        if tokenizer is not None:
+            try:
+                return len(tokenizer.encode(text))
+            except Exception:
+                pass
+
+        # Fallback: 原始估算方法
         chinese = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
         english = len(text) - chinese
         return chinese * 2 + english // 4

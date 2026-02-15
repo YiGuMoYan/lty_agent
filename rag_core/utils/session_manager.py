@@ -39,17 +39,24 @@ class SessionManager:
         if expired:
             logger.info(f"[SessionManager] Cleaned up {len(expired)} expired sessions")
 
-    def create_session(self) -> str:
-        """创建新会话并返回 session_id"""
+    def create_session(self, user_id: str = None) -> str:
+        """创建新会话并返回 session_id
+
+        Args:
+            user_id: 用户ID，如果为None则使用session_id作为user_id
+        """
         session_id = str(uuid.uuid4())
+        # 使用session_id作为user_id（如果未提供）
+        effective_user_id = user_id or session_id
         # 为每个会话创建独立的 Agent 实例
-        agent = CompanionAgent(use_emotional_mode=True, use_unified_generator=True)
+        agent = CompanionAgent(user_id=effective_user_id, use_emotional_mode=True, use_unified_generator=True)
         self.sessions[session_id] = {
             "agent": agent,
+            "user_id": effective_user_id,
             "created_at": time.time(),
             "last_active": time.time()
         }
-        logger.info(f"[SessionManager] Created session: {session_id}")
+        logger.info(f"[SessionManager] Created session: {session_id}, user_id: {effective_user_id}")
         return session_id
 
     def get_agent(self, session_id: str) -> Optional[CompanionAgent]:
