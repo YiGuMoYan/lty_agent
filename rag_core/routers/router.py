@@ -1,16 +1,81 @@
 import json
+import time
+from typing import Optional, Dict, Any, List
 from rag_core.llm.llm_client import LLMClient
 from rag_core.knowledge.rag_tools import TOOLS_SCHEMA
 
+# 意图缓存配置
+INTENT_CACHE_TTL = 300  # 5分钟
+INTENT_CACHE_MAX_SIZE = 100
+
+class IntentCache:
+    """意图路由缓存"""
+    def __init__(self):
+        self._cache: Dict[str, Dict[str, Any]] = {}
+        self._timestamps: Dict[str, float] = {}
+
+    def _normalize_query(self, query: str) -> str:
+        """标准化查询，用于缓存匹配"""
+        # 去除空格、标点，转小写
+        import re
+        normalized = re.sub(r'[^\w\u4e00-\u9fff]', '', query)
+        return normalized.lower()
+
+    def get(self, query: str) -> Optional[Dict]:
+        """获取缓存的意图结果"""
+        key = self._normalize_query(query)
+        if key in self._cache:
+            # 检查是否过期
+            if time.time() - self._timestamps[key] < INTENT_CACHE_TTL:
+                return self._cache[key]
+            else:
+                # 过期清理
+                del self._cache[key]
+                del self._timestamps[key]
+        return None
+
+    def set(self, query: str, result: Dict):
+        """缓存意图结果"""
+        # 简单的LRU：如果缓存满了，删除最老的
+        if len(self._cache) >= INTENT_CACHE_MAX_SIZE:
+            oldest_key = min(self._timestamps, key=self._timestamps.get)
+            del self._cache[oldest_key]
+            del self._timestamps[oldest_key]
+
+        key = self._normalize_query(query)
+        self._cache[key] = result
+        self._timestamps[key] = time.time()
+
+# 全局缓存实例
+_intent_cache = IntentCache()
+
 class IntentRouter:
     def __init__(self):
-        self.client = LLMClient()
+        self.client = LLMClient.get_instance()
 
     async def route(self, user_query, history=None):
         """
         Determine if the query needs tools.
+        优化：添加意图缓存机制
         Returns: { "tool": "name", "args": {...} } or None
         """
+        # 1. 检查缓存
+        cached_result = _intent_cache.get(user_query)
+        if cached_result is not None:
+            print(f"[Router] 缓存命中: {user_query[:20]}... -> {cached_result.get('tool')}")
+            return cached_result
+
+        # 2. 正常路由逻辑
+        result = await self._do_route(user_query, history)
+
+        # 3. 缓存结果（仅缓存有效的工具调用结果）
+        if result and result.get("tool"):
+            _intent_cache.set(user_query, result)
+
+        return result
+
+    async def _do_route(self, user_query, history=None):
+        """执行实际的路由逻辑"""
         import datetime
         current_date_str = datetime.datetime.now().strftime("%Y-%m-%d")
         current_year = datetime.datetime.now().year

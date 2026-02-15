@@ -5,6 +5,27 @@ from .indexing.lyrics_indexer import LyricsIndexer
 from .indexing.fact_indexer import FactIndexer
 from .indexing.graph_indexer import GraphIndexer
 
+# 同义词映射表
+SYNONYM_MAP = {
+    "你": ["洛天依", "天依"],
+    "我": ["使用者", "用户"],
+    "歌": ["歌曲", "音乐", "作品"],
+    "作曲": ["写", "创作"],
+    "演唱": ["唱"],
+    "谁": ["哪个人", "何人"],
+    "什么": ["哪个", "啥"],
+    "什么时候": ["何时", "啥时候"],
+    "怎么样": ["如何", "啥样"],
+    "为什么": ["为何", "咋回事"],
+}
+
+# 来源权重
+SOURCE_WEIGHTS = {
+    "knowledge_graph": 1.5,  # 知识图谱最可靠
+    "lyrics": 1.2,          # 歌词次之
+    "vector": 1.0,          # 向量检索
+}
+
 # Global instances (Lazy Loaded)
 _lyrics_idx = None
 _fact_idx = None
@@ -46,7 +67,63 @@ def get_fact_indexer():
             print(f"[RAG Tools] Auto-indexing warning: {e}")
     return _fact_idx
 
-# --- Tool Functions ---
+# --- Helper Functions ---
+
+def expand_synonyms(query: str) -> list:
+    """
+    扩展查询词的同义词
+    例如: "谁写的歌" -> ["谁写的歌", "谁创作的作品", "谁作曲的音乐"]
+    """
+    expanded = [query]
+
+    for key, synonyms in SYNONYM_MAP.items():
+        if key in query:
+            for syn in synonyms:
+                expanded.append(query.replace(key, syn))
+
+    # 去重
+    return list(set(expanded))[:5]  # 最多5个变体
+
+
+def rerank_results(results: list, query: str, source: str = "vector") -> list:
+    """
+    对搜索结果进行重排序
+    考虑：来源权重、关键词匹配度
+    """
+    if not results:
+        return results
+
+    # 获取来源权重
+    weight = SOURCE_WEIGHTS.get(source, 1.0)
+
+    # 提取查询关键词
+    query_keywords = set(re.findall(r'[\u4e00-\u9fff]+', query.lower()))
+
+    reranked = []
+    for r in results:
+        content = r.get("content", "")
+        content_lower = content.lower()
+
+        # 计算关键词匹配分数
+        keyword_score = 0
+        for kw in query_keywords:
+            if kw in content_lower:
+                keyword_score += 1
+
+        # 综合分数 = 来源权重 * (1 + 关键词匹配加分)
+        final_score = weight * (1 + keyword_score * 0.2)
+
+        r["_score"] = final_score
+        reranked.append(r)
+
+    # 按分数排序
+    reranked.sort(key=lambda x: x["_score"], reverse=True)
+
+    # 移除临时分数字段
+    for r in reranked:
+        r.pop("_score", None)
+
+    return reranked
 
 def query_knowledge_graph(entity_name=None, relation_type=None, category=None, **kwargs):
     """
@@ -98,7 +175,8 @@ def search_lyrics(lyrics_snippet=None, song_title=None, **kwargs):
 
 async def search_knowledge_base(query, filter_category=None):
     """
-    Search vector knowledge base with Query Rewriting.
+    Search vector knowledge base with Query Rewriting and Synonym Expansion.
+    优化版本：添加同义词扩展、结果重排序
     """
     print(f"[Tool] search_knowledge_base: {query} (filter={filter_category})")
 
@@ -111,6 +189,11 @@ async def search_knowledge_base(query, filter_category=None):
     except Exception as e:
         print(f"[Tool] Rewrite failed, using original: {e}")
         effective_query = query
+
+    # 1.5 同义词扩展
+    expanded_queries = expand_synonyms(effective_query)
+    if len(expanded_queries) > 1:
+        print(f"[RAG Tools] 同义词扩展: {expanded_queries}")
 
     # --- Commercial Robustness: Topic-Specific Priority Search ---
     # If the query contains a known topic name (e.g. "COP", "ilem"),
@@ -142,6 +225,9 @@ async def search_knowledge_base(query, filter_category=None):
         # Now we search for the CORRECTED topic
         matches = get_fact_indexer().search_facts(target_topic, filter_dict={"topic": target_topic}, top_k=2)
         if matches:
+            # 标记来源
+            for m in matches:
+                m["_source"] = "topic"
             local_results.extend(matches)
         return local_results
 
@@ -158,11 +244,19 @@ async def search_knowledge_base(query, filter_category=None):
 
     filters = {"category": filter_category} if filter_category else None
 
-    # Use the rewritten query for the main search
-    vector_results = get_fact_indexer().search_facts(effective_query, filters, top_k=5)
+    # 使用重写后的查询进行主搜索 + 同义词搜索
+    vector_results = []
+    for q in expanded_queries[:3]:  # 最多搜索3个变体
+        results = get_fact_indexer().search_facts(q, filters, top_k=3)
+        for r in results:
+            r["_source"] = "vector"
+        vector_results.extend(results)
 
-    # Merge, prioritizing topic matches
+    # Merge, 标记来源
     all_results = topic_results + vector_results
+
+    # 重排序：考虑来源权重和关键词匹配
+    all_results = rerank_results(all_results, effective_query)
 
     # Deduplicate by content
     seen = set()

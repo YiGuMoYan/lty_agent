@@ -15,3 +15,5 @@ uvicorn
 websockets
 requests
 aiohttp
+aiosqlite
+loguru>=0.7.0

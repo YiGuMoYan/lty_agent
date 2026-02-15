@@ -22,6 +22,7 @@ models/
 
 # Logs & System
 *.log
+logs/
 .DS_Store
 nul
 

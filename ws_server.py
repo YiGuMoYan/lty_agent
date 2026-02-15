@@ -11,6 +11,7 @@ import uuid
 import base64
 import time
 from typing import Dict, Optional
+from rag_core.utils.logger import logger
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import RedirectResponse
@@ -18,78 +19,42 @@ from fastapi.staticfiles import StaticFiles
 
 from config import WS_PORT, BASE_DIR, TTS_ENABLED
 from rag_core.agent.companion_agent import CompanionAgent
-from rag_core.generation.tts_client import TTSClient
+from rag_core.generation.async_tts_client import AsyncTTSClient
 from rag_core.generation.tts_streamer import TTSStreamer
+from rag_core.utils.session_manager import session_manager
 
 app = FastAPI()
 
-# 静态文件：Live2D 模型资源
-app.mount("/live2d", StaticFiles(directory=os.path.join(BASE_DIR, "live2d")), name="live2d")
-
-# 静态文件：HTML 页面（直接挂载项目根目录下的 html）
-# 用单独路由返回 HTML，避免挂载整个根目录
-
-class SessionManager:
-    def __init__(self, ttl_seconds=1800):
-        self.sessions: Dict[str, Dict] = {} # {session_id: {'agent': agent, 'last_active': timestamp}}
-        self.ttl_seconds = ttl_seconds
-
-    def create_session(self) -> str:
-        session_id = str(uuid.uuid4())
-        agent = CompanionAgent(use_emotional_mode=True, use_unified_generator=True)
-        self.sessions[session_id] = {
-            'agent': agent,
-            'last_active': time.time()
-        }
-        return session_id
-
-    def get_agent(self, session_id: str) -> Optional[CompanionAgent]:
-        if session_id in self.sessions:
-            self.sessions[session_id]['last_active'] = time.time()
-            return self.sessions[session_id]['agent']
-        return None
-
-    def remove_session(self, session_id: str):
-        if session_id in self.sessions:
-            del self.sessions[session_id]
-
-    def cleanup_expired(self):
-        now = time.time()
-        expired = [sid for sid, data in self.sessions.items() if now - data['last_active'] > self.ttl_seconds]
-        for sid in expired:
-            print(f"[SessionManager] Cleaning up expired session: {sid}")
-            del self.sessions[sid]
-        return len(expired)
-
-session_manager = SessionManager()
-
-@app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(background_cleanup())
-
-async def background_cleanup():
-    while True:
-        await asyncio.sleep(300) # Check every 5 mins
-        count = session_manager.cleanup_expired()
-        if count > 0:
-            print(f"[Cleanup] Removed {count} expired sessions")
+# ... (omitted code) ...
 
 # TTS 服务初始化
 tts_client = None
 tts_streamer = None
 
-if TTS_ENABLED:
-    try:
-        tts_client = TTSClient()
-        if tts_client.test_connection():
-            print(f"[TTS] ✓ 服务连接成功")
+@app.on_event("startup")
+async def startup_event():
+    global tts_client, tts_streamer
+
+    # Start cleanup task
+    asyncio.create_task(background_cleanup())
+
+    # Initialize TTS
+    if TTS_ENABLED:
+        try:
+            tts_client = AsyncTTSClient()
+            await tts_client.initialize()
+            logger.info(f"[TTS] 服务连接成功 (Rate: {tts_client.sample_rate})")
             tts_streamer = TTSStreamer(tts_client)
-        else:
-            print(f"[TTS] ⚠️  服务连接失败，TTS功能将禁用")
+        except Exception as e:
+            logger.error(f"[TTS] 初始化失败: {e}")
             tts_client = None
-    except Exception as e:
-        print(f"[TTS] 初始化失败: {e}")
-        tts_client = None
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    if tts_client:
+        await tts_client.close()
+
+# ... (rest of the file)
 
 
 @app.get("/")
@@ -113,8 +78,10 @@ async def ws_chat(websocket: WebSocket):
     # 为每个连接分配独立的 session 和 agent（启用统一生成）
     session_id = session_manager.create_session()
     agent = session_manager.get_agent(session_id)
+    if hasattr(agent, "initialize"):
+        await agent.initialize()
 
-    print(f"[WS] 新连接: {session_id}, 当前活跃会话: {len(session_manager.sessions)}")
+    logger.info(f"[WS] 新连接: {session_id}, 当前活跃会话: {len(session_manager.sessions)}")
 
     try:
         while True:
@@ -124,7 +91,7 @@ async def ws_chat(websocket: WebSocket):
             agent = session_manager.get_agent(session_id)
             if not agent:
                 # 理论上不会发生，除非被清理
-                print(f"[WS] 会话已失效: {session_id}")
+                logger.warning(f"[WS] 会话已失效: {session_id}")
                 break
 
             msg = json.loads(data)
@@ -160,7 +127,7 @@ async def ws_chat(websocket: WebSocket):
                     await tts_streamer.stream_audio(text, instruct, websocket_sender, loop)
 
             except Exception as e:
-                traceback.print_exc()
+                logger.exception("WebSocket 消息处理异常")
                 err_resp = {
                     "type": "error",
                     "text": f"出错了: {e}",
@@ -174,10 +141,9 @@ async def ws_chat(websocket: WebSocket):
                 await websocket.send_text(json.dumps(err_resp, ensure_ascii=False))
 
     except WebSocketDisconnect:
-        print(f"[WS] 客户端断开: {session_id}")
+        logger.info(f"[WS] 客户端断开: {session_id}")
     except Exception as e:
-        traceback.print_exc()
-        print(f"[WS] 错误: {e}")
+        logger.exception(f"[WS] 错误: {e}")
         try:
             await websocket.send_text(json.dumps({"error": str(e)}, ensure_ascii=False))
         except Exception:
@@ -187,7 +153,7 @@ async def ws_chat(websocket: WebSocket):
         # 这里选择立即清理，如果需要重连机制则不应立即删除
         # 但考虑到目前没有重连恢复逻辑，保持原逻辑清理
         session_manager.remove_session(session_id)
-        print(f"[WS] 清理会话: {session_id}, 剩余: {len(session_manager.sessions)}")
+        logger.info(f"[WS] 清理会话: {session_id}, 剩余: {len(session_manager.sessions)}")
 
 
 if __name__ == "__main__":

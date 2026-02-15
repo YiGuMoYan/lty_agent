@@ -3,6 +3,7 @@ import os
 import asyncio
 from typing import Optional, Dict
 from datetime import datetime
+from rag_core.utils.logger import logger
 from rag_core.llm.llm_client import LLMClient
 from rag_core.emotions.emotional_memory import EmotionalMemory
 from rag_core.generation.live2d_generator import Live2DParamGenerator
@@ -28,7 +29,7 @@ class CompanionAgent:
     MAX_HISTORY_TURNS = 30 # Increased for rolling summary buffer
 
     def __init__(self, use_emotional_mode=True, style: Optional[str] = None, use_unified_generator=True):
-        self.client = LLMClient()
+        self.client = LLMClient.get_instance()
         self.live2d_generator = Live2DParamGenerator()
         self.use_emotional_mode = use_emotional_mode
         self.use_unified_generator = use_unified_generator  # 是否使用统一生成器
@@ -43,7 +44,7 @@ class CompanionAgent:
             try:
                 initial_style = parse_style_from_string(style)
             except ValueError:
-                print(f"[CompanionAgent] 无效的风格: {style}, 使用默认风格")
+                logger.warning(f"无效的风格: {style}, 使用默认风格")
                 initial_style = ResponseStyle.CASUAL
         else:
             try:
@@ -69,13 +70,13 @@ class CompanionAgent:
             emotional_prompt_path = os.path.join(os.path.dirname(PROMPT_PATH), "SYSTEM_PROMPT_EMOTIONAL")
             if os.path.exists(emotional_prompt_path):
                 prompt_file = emotional_prompt_path
-                print("[CompanionAgent] 使用情感陪伴模式")
+                logger.info("使用情感陪伴模式")
 
         try:
             with open(prompt_file, 'r', encoding='utf-8') as f:
                 self.base_system_prompt = f.read()
         except Exception as e:
-            print(f"[CompanionAgent] Warning: Could not load prompt from {prompt_file}: {e}")
+            logger.warning(f"无法加载提示词文件 {prompt_file}: {e}")
             self.base_system_prompt = "你是洛天依。"
 
         # Build initial system prompt and add to history
@@ -84,7 +85,13 @@ class CompanionAgent:
         # 初始化统一生成器（如果启用）
         if self.use_unified_generator:
             self.unified_generator = UnifiedResponseGenerator(self.base_system_prompt)
-            print("[CompanionAgent] 启用统一生成模式（对话+Live2D一次生成）")
+            logger.info("启用统一生成模式（对话+Live2D一次生成）")
+
+    async def initialize(self):
+        """Asynchronous initialization"""
+        if self.use_emotional_mode and self.emotional_memory:
+            await self.emotional_memory.initialize()
+            logger.info("情感记忆系统初始化完成")
 
     def _build_system_prompt(self, emotion_state) -> str:
         """动态构建system prompt，融合基础prompt + 关系状态 + 情感上下文"""
@@ -142,7 +149,7 @@ class CompanionAgent:
         if not (self.use_emotional_mode and self.emotional_memory):
             return
 
-        print("[Companion] 触发滚动总结...")
+        logger.info("触发滚动总结...")
         # Slice self.history[1:11] (skip system prompt, take 10 turns)
         turns_to_summarize = self.history[1:11]
 
@@ -185,15 +192,15 @@ class CompanionAgent:
                 else:
                     self.emotional_memory.profile.conversation_summary = summary_text
 
-                self.emotional_memory._save_profile()
-                print(f"[Companion] 已生成滚动总结: {summary_text[:50]}...")
+                await self.emotional_memory._save_profile()
+                logger.info(f"已生成滚动总结: {summary_text[:50]}...")
 
                 # Remove these 10 turns from history
                 # Keep system prompt (0) and append the rest (11:)
                 self.history = [self.history[0]] + self.history[11:]
 
         except Exception as e:
-            print(f"[Companion] 滚动总结失败: {e}")
+            logger.error(f"滚动总结失败: {e}")
 
     async def _trim_history(self):
         """管理上下文窗口，避免历史记录无限增长"""
@@ -228,12 +235,12 @@ class CompanionAgent:
         time_str = datetime.now().strftime("[%H:%M]")
         self.history.append({"role": "user", "content": f"{time_str} {full_user_msg}"})
 
-        print(f"[Companion] Generating response...")
+        logger.info("Generating response...")
         import time as _time
         _llm_start = _time.perf_counter()
         response_msg = await self.client.chat_with_tools(self.history)
         _llm_elapsed = _time.perf_counter() - _llm_start
-        print(f"[Companion] LLM 生成耗时: {_llm_elapsed:.3f}s")
+        logger.debug(f"LLM 生成耗时: {_llm_elapsed:.3f}s")
 
         base_answer = ""
         if response_msg:
@@ -252,16 +259,15 @@ class CompanionAgent:
         # 4. 存储情感记忆
         if self.use_emotional_mode and emotion_state and self.emotional_memory:
             try:
-                # DB ops are sync, run in executor if needed, but sqlite is fast enough for now usually
-                # Ideally refactor EmotionalMemory to async
-                self.emotional_memory.store_emotional_context(
+                # DB ops are async now
+                await self.emotional_memory.store_emotional_context(
                     emotion_state=emotion_state,
                     user_input=user_input,
                     ai_response=final_answer,
                 )
-                print(f"[Companion] 已保存情感记忆")
+                logger.info("已保存情感记忆")
             except Exception as e:
-                print(f"[Companion] 保存情感记忆失败: {e}")
+                logger.error(f"保存情感记忆失败: {e}")
 
         self.history.append({"role": "assistant", "content": f"{time_str} {final_answer}"})
 
@@ -316,7 +322,7 @@ class CompanionAgent:
         )
 
         _elapsed = _time.perf_counter() - _start
-        print(f"[Companion] 统一生成总耗时: {_elapsed:.3f}s")
+        logger.debug(f"统一生成总耗时: {_elapsed:.3f}s")
 
         # 5. 处理结果
         if unified_result:
@@ -334,17 +340,17 @@ class CompanionAgent:
             # 7. 保存情感记忆
             if self.use_emotional_mode and emotion_state and self.emotional_memory:
                 try:
-                    self.emotional_memory.store_emotional_context(
+                    await self.emotional_memory.store_emotional_context(
                         emotion_state=emotion_state,
                         user_input=user_input,
                         ai_response=text
                     )
                 except Exception as e:
-                    print(f"[Companion] 保存情感记忆失败: {e}")
+                    logger.error(f"保存情感记忆失败: {e}")
 
         else:
             # Fallback: 分离生成
-            print("[Companion] ⚠️ 统一生成失败，回退到分离模式")
+            logger.warning("统一生成失败，回退到分离模式")
             # Note: This will trigger RAG pipeline again in chat() if we called chat() directly
             # But here we already have tool_context, so we should just call LLM directly or implement fallback logic
             # For simplicity, calling self.chat() which re-does RAG is safe but inefficient.
@@ -368,10 +374,10 @@ class CompanionAgent:
         try:
             parsed_style = parse_style_from_string(style)
             self.style_manager.set_style(parsed_style)
-            print(f"[CompanionAgent] 风格已切换为: {parsed_style.value}")
+            logger.info(f"风格已切换为: {parsed_style.value}")
             return True
         except ValueError as e:
-            print(f"[CompanionAgent] 风格切换失败: {e}")
+            logger.error(f"风格切换失败: {e}")
             return False
 
     def get_current_style(self) -> ResponseStyle:
@@ -389,8 +395,8 @@ class CompanionAgent:
         if result is not None:
             return result
 
-        print("[CompanionAgent] LLM Live2D 生成失败，回退到静态映射")
+        logger.warning("LLM Live2D 生成失败，回退到静态映射")
         from emotion_live2d_map import get_live2d_params
         fallback = get_live2d_params(emotion, intensity)
-        print(f"[CompanionAgent] 静态映射结果: emotion={emotion}, params数={len(fallback['params'])}")
+        logger.debug(f"静态映射结果: emotion={emotion}, params数={len(fallback['params'])}")
         return fallback

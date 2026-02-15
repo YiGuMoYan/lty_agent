@@ -290,8 +290,8 @@ class FactIndexer:
 
         try:
             vectors = []
-            # Batch size lowered to prevent CUDA OOM
-            batch_size = 4
+            # Batch size - use config or environment variable
+            batch_size = config.EMBEDDING_BATCH_SIZE
             for i in tqdm(range(0, len(texts_to_embed), batch_size), desc="Embedding"):
                 batch_text = texts_to_embed[i:i+batch_size]
                 batch_vecs = self.embedding_fn(batch_text)

@@ -1,6 +1,7 @@
 """
 统一生成器 — 一次LLM调用同时生成对话内容和Live2D参数
 大幅提升响应速度（从2次调用优化到1次）
+优化版本：抽取公共常量、添加质量评估
 """
 
 import json
@@ -8,25 +9,7 @@ import time
 import asyncio
 from typing import Dict, Any, Optional
 from rag_core.llm.llm_client import LLMClient
-
-# Live2D参数范围定义
-PARAM_RANGES = {
-    "ParamAngleX": (-30, 30), "ParamAngleY": (-30, 30), "ParamAngleZ": (-30, 30),
-    "ParamEyeLOpen": (0, 1), "ParamEyeROpen": (0, 1),
-    "ParamEyeLSmile": (0, 1), "ParamEyeRSmile": (0, 1),
-    "ParamEyeBallX": (-1, 1), "ParamEyeBallY": (-1, 1),
-    "ParamBrowLY": (-1, 1), "ParamBrowRY": (-1, 1),
-    "ParamBrowLAngle": (-1, 1), "ParamBrowRAngle": (-1, 1),
-    "ParamMouthForm": (-1, 1), "ParamMouthOpenY": (0, 1),
-    "ParamCheek": (0, 1),
-    "ParamBodyAngleX": (-4, 4), "ParamBodyAngleY": (-4, 4), "ParamBodyAngleZ": (-4, 4),
-    "ParamBreath": (0, 1),
-}
-
-VALID_POSES = {
-    "ParamPOSE1", "ParamPOSE2", "ParamPOSE3", "ParamPOSE4", "ParamPOSE5",
-    "ParamPOSE6", "ParamPOSE7", "ParamPOSE8", "ParamPOSE10"
-}
+from rag_core.generation.live2d_constants import PARAM_RANGES, VALID_POSES, fill_missing_params, clamp_param
 
 # 统一生成的System Prompt增强部分
 LIVE2D_INSTRUCTION = """
@@ -181,7 +164,7 @@ class UnifiedResponseGenerator:
     """统一响应生成器：一次LLM调用同时生成对话和Live2D参数"""
 
     def __init__(self, base_system_prompt: str):
-        self.client = LLMClient()
+        self.client = LLMClient.get_instance()
         self.base_system_prompt = base_system_prompt
         # 将Live2D指令附加到基础prompt
         self.enhanced_system_prompt = base_system_prompt + LIVE2D_INSTRUCTION
@@ -256,7 +239,12 @@ class UnifiedResponseGenerator:
                     "live2d": validated_live2d
                 }
 
-                print(f"[UnifiedGen] ✓ 成功生成 | 文本长度: {len(result['text'])} | 参数数: {len(validated_live2d['params'])}")
+                # 质量评估
+                quality_score = self._evaluate_quality(result["text"], emotion)
+                if quality_score < 0.6:
+                    print(f"[UnifiedGen] ⚠️ 质量分数较低: {quality_score:.2f}, 文本: {result['text'][:50]}...")
+
+                print(f"[UnifiedGen] ✓ 成功生成 | 文本长度: {len(result['text'])} | 参数数: {len(validated_live2d['params'])} | 质量: {quality_score:.2f}")
                 if validated_live2d.get("pose"):
                     print(f"[UnifiedGen] ✓ 姿势: {validated_live2d['pose']}")
 
@@ -281,7 +269,7 @@ class UnifiedResponseGenerator:
         if not isinstance(params, dict):
             params = {}
 
-        # 裁剪参数到合法范围
+        # 裁剪参数到合法范围，然后填充缺失参数到默认值
         clamped_params = {}
         for key, value in params.items():
             if key not in PARAM_RANGES:
@@ -290,8 +278,10 @@ class UnifiedResponseGenerator:
                 v = float(value)
             except (TypeError, ValueError):
                 continue
-            lo, hi = PARAM_RANGES[key]
-            clamped_params[key] = max(lo, min(hi, v))
+            clamped_params[key] = clamp_param(key, v)
+
+        # 填充缺失的参数到默认值
+        final_params = fill_missing_params(clamped_params)
 
         # 验证姿势
         pose = live2d_data.get("pose")
@@ -304,7 +294,45 @@ class UnifiedResponseGenerator:
             action_sequence = []
 
         return {
-            "params": clamped_params,
+            "params": final_params,
             "pose": pose,
             "action_sequence": action_sequence
         }
+
+    def _evaluate_quality(self, text: str, emotion: str) -> float:
+        """
+        简单质量评估：检查生成文本是否符合基本要求
+        返回分数 0.0 - 1.0
+        """
+        score = 1.0
+
+        # 1. 长度检查：过短或过长都扣分
+        length = len(text)
+        if length < 5:
+            score -= 0.3  # 太短
+        elif length > 500:
+            score -= 0.1  # 太长
+
+        # 2. 检查是否包含禁止的模式
+        forbidden_patterns = [
+            "根据记忆显示",
+            "根据资料显示",
+            "搜索结果显示",
+            "数据显示",
+            "（）",  # 括号动作描写
+            "（",  # 左括号（可能是动作描写
+        ]
+        for pattern in forbidden_patterns:
+            if pattern in text:
+                score -= 0.2
+                if score < 0:
+                    return 0.0
+
+        # 3. 检查重复词（简单的重复检测）
+        words = text.split()
+        if len(words) > 10:
+            unique_words = set(words)
+            if len(unique_words) / len(words) < 0.3:  # 重复词太多
+                score -= 0.2
+
+        return max(0.0, min(1.0, score))

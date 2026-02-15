@@ -113,7 +113,7 @@ python main.py
 
 ## 项目结构
 
-```text
+```
 rag_lty/
 ├── main.py                 # CLI 启动入口
 ├── ws_server.py            # WebSocket 服务入口
@@ -128,8 +128,37 @@ rag_lty/
 ├── dataset/                # 数据集
 │   ├── knowledge_base/     # Markdown 百科文档
 │   └── song/               # 歌词数据
-└── models/                 # 本地模型文件
+├── prompt/                 # System Prompt
+└── live2d/                 # Live2D 模型资源
 ```
+
+---
+
+## 优化记录 (2025-02)
+
+### 阶段 1：系统稳定性
+- ✅ LLM Client 单例化，复用连接
+- ✅ 添加重试机制（指数退避）
+- ✅ 错误分类与降级处理
+
+### 阶段 2：响应速度
+- ✅ 情感分析快速路径（置信度 > 0.8 跳过 LLM）
+- ✅ 意图路由缓存（TTL=5分钟）
+
+### 阶段 3：对话质量
+- ✅ 回复质量评估（长度、禁止模式、重复词检测）
+- ✅ System Prompt 结构化优化
+
+### 阶段 4：知识检索
+- ✅ 同义词扩展查询
+- ✅ 结果重排序（来源权重 + 关键词匹配）
+
+### 阶段 5：Live2D 表现
+- ✅ 公共常量抽取（live2d_constants.py）
+- ✅ 多样性策略优化
+
+### 阶段 6：情感记忆
+- ✅ 关系进化算法优化（情感类型权重、互动频率因子）
 
 ---
 
@@ -140,4 +169,13 @@ rag_lty/
 
 ---
 
-*Created by YiGuMoYan.*
+## 相关资源
+
+- [洛天依官方B站](https://space.bilibili.com/20965533)
+- [Vsinger官网](https://vsinger.com/)
+- [Ollama 本地模型](https://ollama.ai/)
+- [Qdrant 向量数据库](https://qdrant.tech/)
+
+---
+
+*Created by YiGuMoYan. 以洛天依之名.*

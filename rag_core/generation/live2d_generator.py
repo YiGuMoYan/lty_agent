@@ -1,6 +1,7 @@
 """
 Live2D 参数生成器 — 通过 LLM 根据回复文本和情感状态动态生成 Live2D 模型参数
 支持动作多样化、微表情、动作序列等高级特性
+优化版本：使用公共常量、改进多样性策略
 """
 
 import json
@@ -8,35 +9,7 @@ import time
 import random
 from typing import Optional, Dict, Any, List
 from rag_core.llm.llm_client import LLMClient
-
-# 参数合法范围定义
-PARAM_RANGES = {
-    "ParamAngleX": (-30, 30),
-    "ParamAngleY": (-30, 30),
-    "ParamAngleZ": (-30, 30),
-    "ParamEyeLOpen": (0, 1),
-    "ParamEyeROpen": (0, 1),
-    "ParamEyeLSmile": (0, 1),
-    "ParamEyeRSmile": (0, 1),
-    "ParamEyeBallX": (-1, 1),
-    "ParamEyeBallY": (-1, 1),
-    "ParamBrowLY": (-1, 1),
-    "ParamBrowRY": (-1, 1),
-    "ParamBrowLAngle": (-1, 1),
-    "ParamBrowRAngle": (-1, 1),
-    "ParamMouthForm": (-1, 1),
-    "ParamMouthOpenY": (0, 1),
-    "ParamCheek": (0, 1),
-    "ParamBodyAngleX": (-4, 4),
-    "ParamBodyAngleY": (-4, 4),
-    "ParamBodyAngleZ": (-4, 4),
-    "ParamBreath": (0, 1),
-}
-
-VALID_POSES = {
-    "ParamPOSE1", "ParamPOSE2", "ParamPOSE3", "ParamPOSE4", "ParamPOSE5",
-    "ParamPOSE6", "ParamPOSE7", "ParamPOSE8", "ParamPOSE10"
-}
+from rag_core.generation.live2d_constants import PARAM_RANGES, VALID_POSES, fill_missing_params, clamp_param
 
 SYSTEM_PROMPT = """你是 Live2D 虚拟形象的**高级表情动作导演**。
 你的任务是根据角色的回复文本和情感状态，创造**生动、自然、多变**的表情和动作组合。
@@ -176,7 +149,7 @@ SYSTEM_PROMPT = """你是 Live2D 虚拟形象的**高级表情动作导演**。
 
 class Live2DParamGenerator:
     def __init__(self):
-        self.client = LLMClient()
+        self.client = LLMClient.get_instance()
         self.history: List[Dict[str, Any]] = []  # 记录最近的生成历史，避免重复
 
     def generate(self, reply_text: str, emotion: str, intensity: float, max_retries: int = 3) -> Optional[Dict[str, Any]]:
@@ -265,30 +238,26 @@ class Live2DParamGenerator:
         return self._fallback_static(emotion, intensity, reply_text)
 
     def _generate_diversity_hint(self) -> str:
-        """根据历史生成多样性提示"""
+        """
+        根据历史生成多样性提示（优化版本）
+        不再强制避免相同组合，而是添加适度随机扰动
+        """
         if len(self.history) < 2:
             return ""
 
         recent = self.history[-2:]
-        hints = ["\n多样性提示:"]
+        hints = ["\n多样性创作提示:"]
 
-        # 提取最近使用的姿势
+        # 添加适度随机建议，而不是强制避免
+        hints.append("- 在保持语义一致的前提下，可以尝试新的组合")
+        hints.append("- 加入微小的随机扰动让表情更生动")
+
+        # 提供历史参考，但只是作为"不要完全相同"的提示
         recent_poses = [h.get("pose") for h in recent if h.get("pose")]
         if recent_poses:
-            hints.append(f"- 最近使用过的姿势: {', '.join(recent_poses)}，尽量选择不同的")
+            hints.append(f"- 参考：最近用了 {recent_poses[-1]}，这次可以尝试不同的风格")
 
-        # 提取最近的眼球方向
-        recent_eyeball = []
-        for h in recent:
-            params = h.get("params", {})
-            ex = params.get("ParamEyeBallX", 0)
-            ey = params.get("ParamEyeBallY", 0)
-            if ex != 0 or ey != 0:
-                recent_eyeball.append(f"({ex:.1f},{ey:.1f})")
-        if recent_eyeball:
-            hints.append(f"- 最近眼球方向: {', '.join(recent_eyeball)}，请变换新的视线方向")
-
-        return "\n".join(hints) if len(hints) > 1 else ""
+        return "\n".join(hints)
 
     def _add_micro_variations(self, result: Dict[str, Any]) -> Dict[str, Any]:
         """添加微表情随机扰动，增强自然感"""

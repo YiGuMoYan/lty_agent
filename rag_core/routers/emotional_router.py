@@ -1,12 +1,17 @@
 """
 情感路由器 - Emotional Router
 负责识别用户情感状态并判断是否为纯情感倾诉
+优化版本：添加快速路径，减少不必要的LLM调用
 """
 
 import json
 from typing import Dict, List, Optional
 from dataclasses import dataclass
 from rag_core.llm.llm_client import LLMClient
+
+# 快速路径置信度阈值
+KEYWORD_HIGH_CONFIDENCE_THRESHOLD = 0.8
+KEYWORD_MEDIUM_CONFIDENCE_THRESHOLD = 0.6
 
 
 @dataclass
@@ -22,37 +27,39 @@ class EmotionState:
 
 class EmotionalRouter:
     def __init__(self):
-        self.client = LLMClient()
+        self.client = LLMClient.get_instance()
         self._init_emotion_lexicon()
 
     def _init_emotion_lexicon(self):
         """初始化情感词典"""
         self.emotion_keywords = {
-            "开心": ["开心", "快乐", "高兴", "兴奋", "愉快", "欢乐", "喜悦", "满足", "幸福", "乐", "哈哈", "嘻嘻", "哇"],
-            "难过": ["难过", "伤心", "悲伤", "沮丧", "失落", "郁闷", "痛苦", "哭", "眼泪", "呜呜", "唉"],
-            "焦虑": ["焦虑", "紧张", "担心", "害怕", "恐惧", "不安", "压力", "烦躁", "忐忑", "慌", "怕"],
-            "孤独": ["孤独", "寂寞", "一个人", "孤单", "没人", "冷清", "无聊", "空虚"],
-            "愤怒": ["生气", "愤怒", "恼火", "气愤", "火大", "不爽", "烦", "气", "恨"],
-            "疲惫": ["累", "疲惫", "疲倦", "困", "疲劳", "没精神", "乏力", "筋疲力尽"],
-            "困惑": ["困惑", "迷茫", "不知道", "不明白", "疑惑", "疑问", "糊涂", "搞不懂"],
+            "开心": ["开心", "快乐", "高兴", "兴奋", "愉快", "欢乐", "喜悦", "满足", "幸福", "乐", "哈哈", "嘻嘻", "哇", "好耶", "太好了"],
+            "难过": ["难过", "伤心", "悲伤", "沮丧", "失落", "郁闷", "痛苦", "哭", "眼泪", "呜呜", "唉", "心碎", "难受"],
+            "焦虑": ["焦虑", "紧张", "担心", "害怕", "恐惧", "不安", "压力", "烦躁", "忐忑", "慌", "怕", "失眠"],
+            "孤独": ["孤独", "寂寞", "一个人", "孤单", "没人", "冷清", "无聊", "空虚", "没人陪", "自己"],
+            "愤怒": ["生气", "愤怒", "恼火", "气愤", "火大", "不爽", "烦", "气", "恨", "讨厌"],
+            "疲惫": ["累", "疲惫", "疲倦", "困", "疲劳", "没精神", "乏力", "筋疲力尽", "困死了", "好累"],
+            "困惑": ["困惑", "迷茫", "不知道", "不明白", "疑惑", "疑问", "糊涂", "搞不懂", "怎么办"],
         }
 
         self.intensity_indicators = {
-            "high": ["非常", "特别", "超级", "极其", "真的", "太", "超", "爆", "绝了", "max"],
-            "medium": ["比较", "还算", "挺", "蛮", "略微"],
-            "low": ["一点", "稍微", "有点", "不太", "不怎么"]
+            "high": ["非常", "特别", "超级", "极其", "真的", "太", "超", "爆", "绝了", "max", "快要", "简直"],
+            "medium": ["比较", "还算", "挺", "蛮", "略微", "有点", "一些"],
+            "low": ["一点", "稍微", "不太", "不怎么", "略微"]
         }
 
         # 纯情感倾诉表达
         self._pure_emotional_phrases = [
             "陪陪我", "好难受", "想哭", "受不了了", "好想哭",
             "心好累", "好烦", "好孤独", "好寂寞", "抱抱我",
-            "安慰我", "我好难过", "我好累", "我好烦",
+            "安慰我", "我好难过", "我好累", "我好烦", "好累啊",
+            "不想说话", "心情不好", "郁闷", "烦死了", "孤独寂寞",
         ]
 
     async def analyze_emotion(self, user_input: str, history: Optional[List[Dict]] = None) -> EmotionState:
         """
         分析用户输入的情感状态
+        优化：添加快速路径，关键词检测置信度高时跳过LLM调用
 
         Args:
             user_input: 用户输入
@@ -64,11 +71,21 @@ class EmotionalRouter:
         # 1. 基于关键词的快速情感检测
         keyword_result = self._detect_emotion_by_keywords(user_input)
 
-        # 2. 使用LLM进行深度情感分析
+        # 快速路径：关键词检测置信度非常高，直接返回
+        if keyword_result.confidence >= KEYWORD_HIGH_CONFIDENCE_THRESHOLD:
+            print(f"[EmotionalRouter] 快速路径: 关键词置信度 {keyword_result.confidence:.2f} >= {KEYWORD_HIGH_CONFIDENCE_THRESHOLD}, 跳过LLM")
+            return keyword_result
+
+        # 2. 检查是否在纯情感倾诉短语列表中
+        if any(phrase in user_input for phrase in self._pure_emotional_phrases):
+            print(f"[EmotionalRouter] 快速路径: 检测到纯情感倾诉短语")
+            return keyword_result
+
+        # 3. 常规路径：使用LLM进行深度情感分析
         llm_result = await self._analyze_emotion_with_llm(user_input, history if history else [])
 
-        # 3. 选择最佳结果
-        if llm_result.confidence > 0.6:
+        # 4. 选择最佳结果
+        if llm_result.confidence >= KEYWORD_MEDIUM_CONFIDENCE_THRESHOLD:
             return llm_result
         return keyword_result
 
@@ -79,23 +96,45 @@ class EmotionalRouter:
         # 检测主要情感
         detected_emotion = "平静"
         max_score = 0
+        total_matches = 0
 
         for emotion, keywords in self.emotion_keywords.items():
-            score = sum(1 for keyword in keywords if keyword in text)
-            if score > max_score:
-                max_score = score
+            matches = sum(1 for keyword in keywords if keyword in text)
+            total_matches += matches
+            if matches > max_score:
+                max_score = matches
                 detected_emotion = emotion
+
+        # 如果没有匹配任何关键词，返回平静
+        if max_score == 0:
+            return EmotionState(
+                primary_emotion="平静",
+                intensity=0.3,
+                confidence=0.5,
+                context=user_input,
+                triggers=["日常"],
+                timestamp=self._get_timestamp()
+            )
+
+        # 计算置信度：基于匹配数量
+        # 单个强匹配 = 高置信度，多个弱匹配 = 中等置信度
+        if max_score >= 2:
+            confidence = 0.85  # 强匹配
+        elif max_score == 1:
+            confidence = 0.7   # 中等匹配
+        else:
+            confidence = 0.5
 
         # 检测强度
         intensity = 0.5  # 默认中等强度
         for level, indicators in self.intensity_indicators.items():
             if any(indicator in text for indicator in indicators):
                 if level == "high":
-                    intensity = 0.8
+                    intensity = 0.85
                 elif level == "medium":
                     intensity = 0.6
                 elif level == "low":
-                    intensity = 0.3
+                    intensity = 0.35
                 break
 
         # 提取触发因素
@@ -104,7 +143,7 @@ class EmotionalRouter:
         return EmotionState(
             primary_emotion=detected_emotion,
             intensity=intensity,
-            confidence=0.6,  # 关键词法置信度中等
+            confidence=confidence,
             context=user_input,
             triggers=triggers,
             timestamp=self._get_timestamp()
