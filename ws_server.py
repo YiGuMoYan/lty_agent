@@ -21,7 +21,10 @@ from config import WS_PORT, BASE_DIR, TTS_ENABLED
 from rag_core.agent.companion_agent import CompanionAgent
 from rag_core.generation.async_tts_client import AsyncTTSClient
 from rag_core.generation.tts_streamer import TTSStreamer
-from rag_core.utils.session_manager import session_manager
+from rag_core.utils.session_manager import session_manager, MessageQueue
+
+# 消息队列实例
+message_queue = MessageQueue(max_queue_size=10, processing_timeout=60)
 
 app = FastAPI()
 
@@ -183,6 +186,18 @@ async def ws_chat(websocket: WebSocket, user_id: str = None):
             if not user_text:
                 continue
 
+            # 使用消息队列管理连续消息
+            message_id = None
+            try:
+                message_id = message_queue.enqueue(session_id, user_text)
+            except RuntimeError as e:
+                logger.warning(f"[WS] 队列已满: {e}")
+                await websocket.send_text(json.dumps({
+                    "type": "error",
+                    "text": "请求过于频繁，请稍后再试"
+                }, ensure_ascii=False))
+                continue
+
             try:
                 # 🚀 统一生成模式：一次LLM调用同时生成对话和Live2D
                 text, instruct, emotion_state, live2d = await agent.chat_with_live2d_unified(user_text)
@@ -202,6 +217,10 @@ async def ws_chat(websocket: WebSocket, user_id: str = None):
                 # 1. 优先发送文本和动作（优化首字/首帧延迟）
                 await websocket.send_text(json.dumps(response_payload, ensure_ascii=False))
 
+                # 标记消息处理完成
+                if message_id:
+                    message_queue.mark_completed(session_id, message_id, text)
+
                 # 2. 🎤 流式生成并发送TTS音频
                 if tts_streamer:
                     loop = asyncio.get_running_loop()
@@ -212,6 +231,10 @@ async def ws_chat(websocket: WebSocket, user_id: str = None):
 
             except Exception as e:
                 logger.exception("WebSocket 消息处理异常")
+                # 标记消息处理失败
+                if message_id:
+                    message_queue.mark_failed(session_id, message_id, str(e))
+
                 err_resp = {
                     "type": "error",
                     "text": f"出错了: {e}",
