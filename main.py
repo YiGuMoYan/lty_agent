@@ -8,8 +8,8 @@ import argparse
 if sys.platform.startswith('win'):
     os.system('chcp 65001 >nul')
 
-from rag_core.companion_agent import CompanionAgent
-from rag_core.emotional_memory import EmotionalMemory
+from rag_core.agent.companion_agent import CompanionAgent
+from rag_core.emotions.emotional_memory import EmotionalMemory
 
 def print_banner():
     """打印启动横幅"""

@@ -16,8 +16,8 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from config import WS_PORT, BASE_DIR, TTS_ENABLED
-from rag_core.companion_agent import CompanionAgent
-from rag_core.tts_client import TTSClient
+from rag_core.agent.companion_agent import CompanionAgent
+from rag_core.generation.tts_client import TTSClient
 
 app = FastAPI()
 
