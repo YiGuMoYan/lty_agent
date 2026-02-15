@@ -145,3 +145,29 @@ def get_live2d_params(emotion: str, intensity: float) -> dict:
             pose = pose_id
 
     return {"params": params, "pose": pose}
+
+
+class Live2DSmoother:
+    """Live2D 参数平滑器 (低通滤波)"""
+    def __init__(self, alpha: float = 0.3):
+        self.current_params = NEUTRAL_PARAMS.copy()
+        self.alpha = alpha  # 平滑系数 (0.0-1.0)，越小越平滑但延迟越高
+
+    def smooth(self, target_params: dict) -> dict:
+        smoothed = {}
+        # 遍历所有目标参数
+        for key, target_val in target_params.items():
+            # 获取当前值（如果没有则默认为目标值，避免第一帧跳变）
+            current_val = self.current_params.get(key, target_val)
+
+            # 低通滤波: y[i] = α * x[i] + (1-α) * y[i-1]
+            new_val = self.alpha * target_val + (1 - self.alpha) * current_val
+
+            smoothed[key] = new_val
+            self.current_params[key] = new_val
+
+        # 确保包含所有 key (以防 target_params 不完整)
+        # 这里假设 target_params 通常是完整的 (from get_live2d_params)
+
+        return smoothed
+

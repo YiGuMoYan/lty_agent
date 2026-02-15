@@ -9,6 +9,7 @@ from rag_core.generation.live2d_generator import Live2DParamGenerator
 from rag_core.generation.unified_generator import UnifiedResponseGenerator
 from rag_core.generation.response_style import StyleManager, ResponseStyle, parse_style_from_string
 from rag_core.agent.rag_orchestrator import RagOrchestrator
+from emotion_live2d_map import Live2DSmoother
 from config import PROMPT_PATH, DEFAULT_RESPONSE_STYLE
 
 class CompanionAgent:
@@ -34,6 +35,9 @@ class CompanionAgent:
 
         # 初始化 RAG 编排器 (负责情感分析、路由和工具执行)
         self.orchestrator = RagOrchestrator(use_emotional_mode=use_emotional_mode)
+
+        # 初始化 Live2D 平滑器
+        self.smoother = Live2DSmoother(alpha=0.3)
 
         if style:
             try:
@@ -319,6 +323,10 @@ class CompanionAgent:
             text = unified_result["text"]
             live2d_data = unified_result["live2d"]
 
+            # Apply Smoothing to params
+            if "params" in live2d_data:
+                live2d_data["params"] = self.smoother.smooth(live2d_data["params"])
+
             # 6. 更新历史
             self.history.append({"role": "user", "content": f"{time_str} {full_user_msg}"})
             self.history.append({"role": "assistant", "content": f"{time_str} {text}"})
@@ -343,6 +351,10 @@ class CompanionAgent:
             # Ideally we should split chat() to chat_with_context()
             text = await self.chat(user_input)
             live2d_data = self.generate_live2d_params(text, emotion, emotion_state.intensity)
+
+            # Apply Smoothing (generate_live2d_params might return unsmoothed data)
+            if "params" in live2d_data:
+                live2d_data["params"] = self.smoother.smooth(live2d_data["params"])
 
             # History and memory are handled inside self.chat()
 

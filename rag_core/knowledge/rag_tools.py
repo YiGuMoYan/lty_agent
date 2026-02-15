@@ -9,6 +9,15 @@ from .indexing.graph_indexer import GraphIndexer
 _lyrics_idx = None
 _fact_idx = None
 _graph_idx = None
+_rewriter = None
+
+def get_query_rewriter():
+    global _rewriter
+    if _rewriter is None:
+        from rag_core.routers.query_rewriter import QueryRewriter
+        _rewriter = QueryRewriter()
+    return _rewriter
+
 
 def get_lyrics_indexer():
     global _lyrics_idx
@@ -87,18 +96,28 @@ def search_lyrics(lyrics_snippet=None, song_title=None, **kwargs):
     songs = get_lyrics_indexer().search_lyrics(query, top_k=3)
     return json.dumps(songs, ensure_ascii=False)
 
-def search_knowledge_base(query, filter_category=None):
+async def search_knowledge_base(query, filter_category=None):
     """
-    Search vector knowledge base.
+    Search vector knowledge base with Query Rewriting.
     """
     print(f"[Tool] search_knowledge_base: {query} (filter={filter_category})")
+
+    # 1. Query Rewriting (Async)
+    try:
+        rewriter = get_query_rewriter()
+        # We don't have context here easily unless passed, but we can rewrite the query itself
+        rewritten_query = await rewriter.rewrite(query)
+        effective_query = rewritten_query
+    except Exception as e:
+        print(f"[Tool] Rewrite failed, using original: {e}")
+        effective_query = query
 
     # --- Commercial Robustness: Topic-Specific Priority Search ---
     # If the query contains a known topic name (e.g. "COP", "ilem"),
     # and we find a file matching that topic, we prioritize it.
     topic_results = []
     # Clean query and extract potential topic keywords (only Nouns/Names)
-    keywords = re.findall(r'[\u4e00-\u9fffA-Za-z0-9]+', query)
+    keywords = re.findall(r'[\u4e00-\u9fffA-Za-z0-9]+', effective_query)
     stop_words = {"the", "and", "meaning", "perspective", "song", "who", "wrote", "of", "about", "for", "is", "was", "to", "this", "that", "it"}
 
     valid_keywords = [kw for kw in keywords if len(kw) >= 2 and kw.lower() not in stop_words]
@@ -138,7 +157,9 @@ def search_knowledge_base(query, filter_category=None):
                 print(f"[RAG Tools] Error processing keyword: {e}")
 
     filters = {"category": filter_category} if filter_category else None
-    vector_results = get_fact_indexer().search_facts(query, filters, top_k=5)
+
+    # Use the rewritten query for the main search
+    vector_results = get_fact_indexer().search_facts(effective_query, filters, top_k=5)
 
     # Merge, prioritizing topic matches
     all_results = topic_results + vector_results

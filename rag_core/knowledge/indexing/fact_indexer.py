@@ -6,11 +6,13 @@ import config
 from tqdm import tqdm
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
+import jieba
+from rank_bm25 import BM25Okapi
 
 class FactIndexer:
     def __init__(self, persist_directory=None):
         """
-        Initialize FactIndexer with Qdrant (Local Mode).
+        Initialize FactIndexer with Qdrant (Local Mode) and BM25.
         """
         if persist_directory is None:
             base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -39,6 +41,57 @@ class FactIndexer:
                     distance=models.Distance.COSINE
                 )
             )
+
+        # Initialize BM25
+        self.bm25 = None
+        self.doc_map = [] # List of {'id': id, 'content': text, 'metadata': meta}
+        self._build_bm25_index()
+
+    def _build_bm25_index(self):
+        """Build BM25 index from Qdrant data"""
+        if not self.client.collection_exists(self.collection_name):
+            return
+
+        print("[FactIndexer] Loading documents for BM25...")
+        try:
+            # Scroll all points
+            points = []
+            offset = None
+            while True:
+                res = self.client.scroll(
+                    collection_name=self.collection_name,
+                    scroll_filter=None,
+                    limit=200,
+                    with_payload=True,
+                    with_vectors=False,
+                    offset=offset
+                )
+                batch, offset = res
+                points.extend(batch)
+                if offset is None:
+                    break
+
+            if not points:
+                return
+
+            self.doc_map = []
+            corpus = []
+
+            for p in points:
+                text = p.payload.get('text', '')
+                self.doc_map.append({
+                    'id': p.id,
+                    'content': text,
+                    'metadata': p.payload.get('full_metadata', {})
+                })
+                corpus.append(text)
+
+            tokenized_corpus = [list(jieba.cut(doc)) for doc in corpus]
+            self.bm25 = BM25Okapi(tokenized_corpus)
+            print(f"[FactIndexer] BM25 index built with {len(corpus)} documents.")
+
+        except Exception as e:
+            print(f"[FactIndexer] Failed to build BM25 index: {e}")
 
     def count(self):
         """Return number of entities in collection."""
@@ -264,12 +317,66 @@ class FactIndexer:
             self.client.upsert(collection_name=self.collection_name, points=batch)
 
         print("[FactIndexer] Indexing complete.")
+        # Rebuild BM25 after indexing
+        self._build_bm25_index()
 
     def search_facts(self, query, filter_dict=None, top_k=3):
         """
-        Search for facts.
+        Hybrid Search: Vector + BM25 with RRF Fusion
         """
-        print(f"[FactIndexer] Searching: {query} with filter {filter_dict}")
+        # 1. Vector Search
+        vector_hits = self._search_vector(query, filter_dict, top_k=top_k*2)
+
+        # 2. BM25 Search
+        bm25_hits = self._search_bm25(query, filter_dict, top_k=top_k*2)
+
+        # 3. RRF Fusion
+        fused_results = self._rrf_fusion(vector_hits, bm25_hits, k=60)
+
+        return fused_results[:top_k]
+
+    def _search_bm25(self, query, filter_dict=None, top_k=5):
+        if not self.bm25:
+            return []
+
+        tokenized_query = list(jieba.cut(query))
+        doc_scores = self.bm25.get_scores(tokenized_query)
+
+        # Get top indices
+        top_indices = sorted(range(len(doc_scores)), key=lambda i: doc_scores[i], reverse=True)
+
+        results = []
+        count = 0
+        for i in top_indices:
+            if doc_scores[i] <= 0:
+                break
+
+            doc = self.doc_map[i]
+
+            # Apply Filter
+            if filter_dict:
+                match = True
+                for k, v in filter_dict.items():
+                    # Simple metadata check
+                    if doc['metadata'].get(k) != v:
+                        match = False
+                        break
+                if not match:
+                    continue
+
+            results.append({
+                "content": doc['content'],
+                "metadata": doc['metadata'],
+                "id": doc['id'],
+                "score": doc_scores[i]
+            })
+            count += 1
+            if count >= top_k:
+                break
+        return results
+
+    def _search_vector(self, query, filter_dict=None, top_k=3):
+        print(f"[FactIndexer] Vector Searching: {query}")
 
         # 1. Embed Query
         try:
@@ -293,22 +400,24 @@ class FactIndexer:
                 query_filter = models.Filter(must=conditions)
 
         # 3. Search
-        # Explicit check for search method availability (Qdrant client version compatibility)
-        if hasattr(self.client, "search"):
-             hits = self.client.search(
-                collection_name=self.collection_name,
-                query_vector=query_vector,
-                query_filter=query_filter,
-                limit=top_k
-            )
-        else:
-            # Fallback for some local clients or older versions
-             hits = self.client.query_points(
-                collection_name=self.collection_name,
-                query=query_vector,
-                query_filter=query_filter,
-                limit=top_k
-             ).points
+        try:
+            if hasattr(self.client, "search"):
+                 hits = self.client.search(
+                    collection_name=self.collection_name,
+                    query_vector=query_vector,
+                    query_filter=query_filter,
+                    limit=top_k
+                )
+            else:
+                 hits = self.client.query_points(
+                    collection_name=self.collection_name,
+                    query=query_vector,
+                    query_filter=query_filter,
+                    limit=top_k
+                 ).points
+        except Exception as e:
+            print(f"[FactIndexer] Qdrant search error: {e}")
+            return []
 
         # 4. Format Results
         refs = []
@@ -321,6 +430,30 @@ class FactIndexer:
             })
 
         return refs
+
+    def _rrf_fusion(self, vector_results, bm25_results, k=60):
+        """
+        Reciprocal Rank Fusion
+        """
+        scores = {}
+
+        # Helper to process results
+        def process_list(results, weight=1.0):
+            for rank, item in enumerate(results):
+                doc_content = item['content'] # Use content as key for deduplication
+                if doc_content not in scores:
+                    scores[doc_content] = {
+                        "score": 0.0,
+                        "data": item
+                    }
+                scores[doc_content]["score"] += weight / (k + rank + 1)
+
+        process_list(vector_results)
+        process_list(bm25_results)
+
+        # Sort by fused score
+        sorted_docs = sorted(scores.values(), key=lambda x: x["score"], reverse=True)
+        return [item["data"] for item in sorted_docs]
 
 if __name__ == "__main__":
     indexer = FactIndexer()

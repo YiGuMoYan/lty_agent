@@ -9,7 +9,8 @@ import os
 import traceback
 import uuid
 import base64
-from typing import Dict
+import time
+from typing import Dict, Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import RedirectResponse
@@ -28,8 +29,50 @@ app.mount("/live2d", StaticFiles(directory=os.path.join(BASE_DIR, "live2d")), na
 # 静态文件：HTML 页面（直接挂载项目根目录下的 html）
 # 用单独路由返回 HTML，避免挂载整个根目录
 
-# 多用户隔离：每个连接独立的 agent 实例
-active_agents: Dict[str, CompanionAgent] = {}
+class SessionManager:
+    def __init__(self, ttl_seconds=1800):
+        self.sessions: Dict[str, Dict] = {} # {session_id: {'agent': agent, 'last_active': timestamp}}
+        self.ttl_seconds = ttl_seconds
+
+    def create_session(self) -> str:
+        session_id = str(uuid.uuid4())
+        agent = CompanionAgent(use_emotional_mode=True, use_unified_generator=True)
+        self.sessions[session_id] = {
+            'agent': agent,
+            'last_active': time.time()
+        }
+        return session_id
+
+    def get_agent(self, session_id: str) -> Optional[CompanionAgent]:
+        if session_id in self.sessions:
+            self.sessions[session_id]['last_active'] = time.time()
+            return self.sessions[session_id]['agent']
+        return None
+
+    def remove_session(self, session_id: str):
+        if session_id in self.sessions:
+            del self.sessions[session_id]
+
+    def cleanup_expired(self):
+        now = time.time()
+        expired = [sid for sid, data in self.sessions.items() if now - data['last_active'] > self.ttl_seconds]
+        for sid in expired:
+            print(f"[SessionManager] Cleaning up expired session: {sid}")
+            del self.sessions[sid]
+        return len(expired)
+
+session_manager = SessionManager()
+
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(background_cleanup())
+
+async def background_cleanup():
+    while True:
+        await asyncio.sleep(300) # Check every 5 mins
+        count = session_manager.cleanup_expired()
+        if count > 0:
+            print(f"[Cleanup] Removed {count} expired sessions")
 
 # TTS 服务初始化
 tts_client = None
@@ -68,14 +111,22 @@ async def ws_chat(websocket: WebSocket):
     await websocket.accept()
 
     # 为每个连接分配独立的 session 和 agent（启用统一生成）
-    session_id = str(uuid.uuid4())
-    agent = CompanionAgent(use_emotional_mode=True, use_unified_generator=True)
-    active_agents[session_id] = agent
-    print(f"[WS] 新连接: {session_id}, 当前活跃: {len(active_agents)}")
+    session_id = session_manager.create_session()
+    agent = session_manager.get_agent(session_id)
+
+    print(f"[WS] 新连接: {session_id}, 当前活跃会话: {len(session_manager.sessions)}")
 
     try:
         while True:
             data = await websocket.receive_text()
+
+            # 刷新活跃时间
+            agent = session_manager.get_agent(session_id)
+            if not agent:
+                # 理论上不会发生，除非被清理
+                print(f"[WS] 会话已失效: {session_id}")
+                break
+
             msg = json.loads(data)
             user_text = msg.get("text", "").strip()
             if not user_text:
@@ -132,10 +183,11 @@ async def ws_chat(websocket: WebSocket):
         except Exception:
             pass
     finally:
-        # 清理会话
-        if session_id in active_agents:
-            del active_agents[session_id]
-            print(f"[WS] 清理会话: {session_id}, 剩余: {len(active_agents)}")
+        # 清理会话 (连接断开即清理，或者保留等待超时？)
+        # 这里选择立即清理，如果需要重连机制则不应立即删除
+        # 但考虑到目前没有重连恢复逻辑，保持原逻辑清理
+        session_manager.remove_session(session_id)
+        print(f"[WS] 清理会话: {session_id}, 剩余: {len(session_manager.sessions)}")
 
 
 if __name__ == "__main__":
