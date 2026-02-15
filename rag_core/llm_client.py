@@ -1,6 +1,5 @@
 import os
-from openai import OpenAI
-
+from openai import AsyncOpenAI
 import config
 
 class LLMClient:
@@ -12,21 +11,17 @@ class LLMClient:
 
         print(f"[LLMClient] Connecting to {self.base_url} (Model: {self.model_name})")
 
-        self.client = OpenAI(
+        self.client = AsyncOpenAI(
             api_key=self.api_key,
             base_url=self.base_url
         )
 
-    def chat_with_tools(self, messages, tools=None, tool_choice="auto"):
+    async def chat_with_tools(self, messages, tools=None, tool_choice="auto"):
         """
-        Chat completion with optional tool calling.
+        Chat completion with optional tool calling (Async).
         """
         try:
-            # Check if model string indicates support for tools? 
-            # Most modern Ollama models (llama3, mistral, qwen) support it.
-            # lty_v6:7b is likely Qwen based (user mentioned lty_qwen_emo previously).
-            
-            response = self.client.chat.completions.create(
+            response = await self.client.chat.completions.create(
                 model=self.model_name,
                 messages=messages,
                 tools=tools if tools else None,
@@ -36,5 +31,4 @@ class LLMClient:
             return response.choices[0].message
         except Exception as e:
             print(f"[LLMClient] Error: {e}")
-            # Fallback or retry logic could go here
             return None

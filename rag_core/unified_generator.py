@@ -5,6 +5,7 @@
 
 import json
 import time
+import asyncio
 from typing import Dict, Any, Optional
 from .llm_client import LLMClient
 
@@ -185,9 +186,9 @@ class UnifiedResponseGenerator:
         # 将Live2D指令附加到基础prompt
         self.enhanced_system_prompt = base_system_prompt + LIVE2D_INSTRUCTION
 
-    def generate(self, messages: list, emotion: str, intensity: float, max_retries: int = 2) -> Optional[Dict[str, Any]]:
+    async def generate(self, messages: list, emotion: str, intensity: float, max_retries: int = 2) -> Optional[Dict[str, Any]]:
         """
-        统一生成对话和Live2D参数
+        统一生成对话和Live2D参数 (Async)
 
         Args:
             messages: 对话历史（不含system）
@@ -213,13 +214,18 @@ class UnifiedResponseGenerator:
         # 在最后一条user消息中添加情绪提示
         if full_messages[-1]["role"] == "user":
             emotion_hint = f"\n\n[当前情感: {emotion}, 强度: {intensity:.2f}]"
-            full_messages[-1]["content"] += emotion_hint
+            # 注意：这里直接修改了字典，可能会影响外部引用。最好copy一份。
+            # 但为了性能，且messages通常是临时构建的，暂时这样。
+            # 为了安全，复制最后一条
+            last_msg = full_messages[-1].copy()
+            last_msg["content"] += emotion_hint
+            full_messages[-1] = last_msg
 
         for attempt in range(max_retries):
             try:
                 start = time.perf_counter()
 
-                response = self.client.client.chat.completions.create(
+                response = await self.client.client.chat.completions.create(
                     model=self.client.model_name,
                     messages=full_messages,
                     response_format={"type": "json_object"},
@@ -259,7 +265,7 @@ class UnifiedResponseGenerator:
             except Exception as e:
                 print(f"[UnifiedGen] 尝试 {attempt + 1} 失败: {e}")
                 if attempt < max_retries - 1:
-                    time.sleep(0.3 * (attempt + 1))
+                    await asyncio.sleep(0.3 * (attempt + 1))
                 else:
                     print("[UnifiedGen] ⚠️  所有重试失败，使用分离模式fallback")
                     return None

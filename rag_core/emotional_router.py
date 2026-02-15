@@ -50,7 +50,7 @@ class EmotionalRouter:
             "安慰我", "我好难过", "我好累", "我好烦",
         ]
 
-    def analyze_emotion(self, user_input: str, history: Optional[List[Dict]] = None) -> EmotionState:
+    async def analyze_emotion(self, user_input: str, history: Optional[List[Dict]] = None) -> EmotionState:
         """
         分析用户输入的情感状态
 
@@ -65,7 +65,7 @@ class EmotionalRouter:
         keyword_result = self._detect_emotion_by_keywords(user_input)
 
         # 2. 使用LLM进行深度情感分析
-        llm_result = self._analyze_emotion_with_llm(user_input, history if history else [])
+        llm_result = await self._analyze_emotion_with_llm(user_input, history if history else [])
 
         # 3. 选择最佳结果
         if llm_result.confidence > 0.6:
@@ -110,7 +110,7 @@ class EmotionalRouter:
             timestamp=self._get_timestamp()
         )
 
-    def _analyze_emotion_with_llm(self, user_input: str, history: Optional[List[Dict]] = None) -> EmotionState:
+    async def _analyze_emotion_with_llm(self, user_input: str, history: Optional[List[Dict]] = None) -> EmotionState:
         """使用LLM进行深度情感分析"""
         context_str = "无"
         if history and len(history) > 0:
@@ -138,7 +138,7 @@ class EmotionalRouter:
                 {"role": "user", "content": user_input}
             ]
 
-            response = self.client.client.chat.completions.create(
+            response = await self.client.client.chat.completions.create(
                 model=self.client.model_name,
                 messages=messages,
                 response_format={"type": "json_object"},

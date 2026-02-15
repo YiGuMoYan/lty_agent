@@ -8,6 +8,7 @@ import json
 import os
 import traceback
 import uuid
+import base64
 from typing import Dict
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -78,10 +79,11 @@ async def ws_chat(websocket: WebSocket):
 
             try:
                 # 🚀 统一生成模式：一次LLM调用同时生成对话和Live2D
-                loop = asyncio.get_event_loop()
-                text, instruct, emotion_state, live2d = await loop.run_in_executor(
-                    None, agent.chat_with_live2d_unified, user_text
-                )
+                # UPDATE: agent methods are now async, so we await them directly!
+                # text, instruct, emotion_state, live2d = await loop.run_in_executor(
+                #    None, agent.chat_with_live2d_unified, user_text
+                # )
+                text, instruct, emotion_state, live2d = await agent.chat_with_live2d_unified(user_text)
 
                 # 准备文本响应数据（暂时不发，等音频准备好）
                 response_payload = {
@@ -101,9 +103,11 @@ async def ws_chat(websocket: WebSocket):
                 # 🎤 流式生成并发送TTS音频
                 if tts_client:
                     try:
-                        import base64
+                        # 1. 获取 TTS 流生成器
+                        # Note: TTS client uses requests (sync), so we still need run_in_executor for the stream generation
+                        # or refactor TTSClient to be async (future work). For now, keep it in executor.
+                        loop = asyncio.get_running_loop()
 
-                        # 1. 获取 TTS 流生成器 (在 executor 中运行，避免阻塞)
                         def get_tts_stream():
                             return tts_client.generate_stream(text, instruct)
 

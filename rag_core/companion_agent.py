@@ -1,5 +1,6 @@
 import json
 import os
+import asyncio
 from typing import Optional, Dict
 from datetime import datetime
 from .llm_client import LLMClient
@@ -127,8 +128,8 @@ class CompanionAgent:
         parts.append(self.base_system_prompt)
         return "".join(parts)
 
-    def _summarize_history(self):
-        """滚动总结历史对话"""
+    async def _summarize_history(self):
+        """滚动总结历史对话 (Async)"""
         if len(self.history) <= 25:
             return
 
@@ -164,7 +165,7 @@ class CompanionAgent:
             # Call LLM
             # We use a temporary simple history for this call
             summary_msgs = [{"role": "user", "content": prompt}]
-            summary_response = self.client.chat_with_tools(summary_msgs)
+            summary_response = await self.client.chat_with_tools(summary_msgs)
 
             if summary_response and summary_response.content:
                 summary_text = summary_response.content.strip()
@@ -189,10 +190,10 @@ class CompanionAgent:
         except Exception as e:
             print(f"[Companion] 滚动总结失败: {e}")
 
-    def _trim_history(self):
+    async def _trim_history(self):
         """管理上下文窗口，避免历史记录无限增长"""
         # Try summarizing first
-        self._summarize_history()
+        await self._summarize_history()
 
         if len(self.history) > 1:
             # 始终保留 system prompt (index 0)
@@ -203,7 +204,7 @@ class CompanionAgent:
             if len(remaining) > self.MAX_HISTORY_TURNS:
                  self.history = [system_prompt] + remaining[-self.MAX_HISTORY_TURNS:]
 
-    def _execute_rag_pipeline(self, user_input):
+    async def _execute_rag_pipeline(self, user_input):
         """
         执行核心 RAG 流程：情感分析 -> 意图路由 -> 工具执行 (含 DeepSearch) -> 返回上下文
         Returns: (tool_context, emotion_state, is_pure_emotional)
@@ -214,7 +215,7 @@ class CompanionAgent:
 
         if self.use_emotional_mode and self.emotional_router:
             try:
-                emotion_state = self.emotional_router.analyze_emotion(user_input, self.history)
+                emotion_state = await self.emotional_router.analyze_emotion(user_input, self.history)
                 is_pure_emotional = self.emotional_router.is_pure_emotional_query(user_input, emotion_state)
                 if is_pure_emotional:
                     print(f"[Companion] 纯情感倾诉: {emotion_state.primary_emotion}(强度:{emotion_state.intensity:.2f})")
@@ -224,7 +225,7 @@ class CompanionAgent:
         # 1. Intent Routing — 始终执行（除非纯情感倾诉）
         route_result = None
         if not is_pure_emotional:
-            route_result = self.router.route(user_input, history=self.history)
+            route_result = await self.router.route(user_input, history=self.history)
 
         tool_context = ""
 
@@ -236,7 +237,10 @@ class CompanionAgent:
             if func_name in AVAILABLE_TOOLS:
                 function_to_call = AVAILABLE_TOOLS[func_name]
                 try:
-                    tool_result = function_to_call(**func_args)
+                    # Note: Tool functions are synchronous for now (unless we refactor rag_tools.py)
+                    # Running them in executor to avoid blocking if they are slow
+                    loop = asyncio.get_running_loop()
+                    tool_result = await loop.run_in_executor(None, lambda: function_to_call(**func_args))
 
                     # --- DeepSearch (Multi-hop) ---
                     candidates = set()
@@ -252,6 +256,12 @@ class CompanionAgent:
                                 candidates.add(item)
                             elif isinstance(item, dict) and "result" in item:
                                 candidates.add(item["result"])
+                            # Add support for structured objects returned by tools
+                            elif isinstance(item, dict) and "song_title" in item:
+                                candidates.add(item["song_title"])
+                            elif isinstance(item, dict) and "content" in item:
+                                # Extract entities from content? Heuristic.
+                                pass
 
                     import re
                     text_content = str(tool_result)
@@ -269,11 +279,18 @@ class CompanionAgent:
                         print(f"[Companion] DeepSearch detected entities: {final_candidates}. Triggering recursive lookup...")
                         from .rag_tools import search_knowledge_base
                         extra_info = ""
-                        for entity in final_candidates:
-                            if len(entity) < 2: continue
-                            kb_res = search_knowledge_base(query=entity)
-                            if kb_res and len(kb_res) > 50 and "[]" not in kb_res:
-                                extra_info += f"\\n\\n【关联档案：{entity}】\\n{kb_res}"
+
+                        # Parallelize secondary searches
+                        async def fetch_extra(entity):
+                            if len(entity) < 2: return ""
+                            res = await loop.run_in_executor(None, lambda: search_knowledge_base(query=entity))
+                            if res and len(res) > 50 and "[]" not in res:
+                                return f"\\n\\n【关联档案：{entity}】\\n{res}"
+                            return ""
+
+                        extra_results = await asyncio.gather(*[fetch_extra(e) for e in final_candidates])
+                        extra_info = "".join(extra_results)
+
                         if extra_info:
                              tool_result += extra_info
                     # --- End DeepSearch ---
@@ -290,7 +307,7 @@ class CompanionAgent:
                         if func_name == "query_knowledge_graph":
                              print(f"[Companion] Graph failed completely. Last resort: KB Search.")
                              from .rag_tools import search_knowledge_base
-                             kb_res = search_knowledge_base(query=func_args.get('entity_name', ''))
+                             kb_res = await loop.run_in_executor(None, lambda: search_knowledge_base(query=func_args.get('entity_name', '')))
                              if kb_res and kb_res != "[]":
                                  tool_context = f"\n\n【共鸣雷达补救】\n原图谱查询失败，但在档案库中发现：\n{kb_res}\n(请回答)"
                              else:
@@ -307,12 +324,12 @@ class CompanionAgent:
 
         return tool_context, emotion_state, is_pure_emotional
 
-    def chat(self, user_input):
+    async def chat(self, user_input):
         """
-        Process user input: Emotional Analysis -> Intent Routing -> Tool -> Response
+        Process user input: Emotional Analysis -> Intent Routing -> Tool -> Response (Async)
         """
         # 1. Execute RAG Pipeline
-        tool_context, emotion_state, is_pure_emotional = self._execute_rag_pipeline(user_input)
+        tool_context, emotion_state, is_pure_emotional = await self._execute_rag_pipeline(user_input)
 
         # 2. 动态构建system prompt（含情感上下文）
         if self.use_emotional_mode and emotion_state:
@@ -323,17 +340,13 @@ class CompanionAgent:
         if tool_context:
             full_user_msg += tool_context
 
-        # history只存原始user_input (Wait, logic changed to store full_user_msg in previous thought)
-        # Original code said: # history只存原始user_input
-        # But code was: self.history.append({"role": "user", "content": full_user_msg})
-        # So it stored full_user_msg.
         time_str = datetime.now().strftime("[%H:%M]")
         self.history.append({"role": "user", "content": f"{time_str} {full_user_msg}"})
 
         print(f"[Companion] Generating response...")
         import time as _time
         _llm_start = _time.perf_counter()
-        response_msg = self.client.chat_with_tools(self.history)
+        response_msg = await self.client.chat_with_tools(self.history)
         _llm_elapsed = _time.perf_counter() - _llm_start
         print(f"[Companion] LLM 生成耗时: {_llm_elapsed:.3f}s")
 
@@ -354,6 +367,8 @@ class CompanionAgent:
         # 4. 存储情感记忆
         if self.use_emotional_mode and emotion_state and self.emotional_memory:
             try:
+                # DB ops are sync, run in executor if needed, but sqlite is fast enough for now usually
+                # Ideally refactor EmotionalMemory to async
                 self.emotional_memory.store_emotional_context(
                     emotion_state=emotion_state,
                     user_input=user_input,
@@ -366,54 +381,20 @@ class CompanionAgent:
         self.history.append({"role": "assistant", "content": f"{time_str} {final_answer}"})
 
         # 5. 上下文截断
-        self._trim_history()
+        await self._trim_history()
 
         return final_answer
 
-    def chat_with_emotion(self, user_input):
-        """返回 (回复文本, 语气指令)，语气基于情感分析自动生成"""
-        # 先做情感分析拿到 emotion_state
-        emotion = "平静"
-        if self.use_emotional_mode and self.emotional_router:
-            try:
-                emotion_state = self.emotional_router.analyze_emotion(user_input, self.history)
-                emotion = emotion_state.primary_emotion
-            except Exception:
-                pass
-
-        text = self.chat(user_input)
-        instruct = self.EMOTION_INSTRUCT_MAP.get(emotion, self.EMOTION_INSTRUCT_MAP["平静"])
-        return text, instruct
-
-    def chat_with_emotion_state(self, user_input):
-        """返回 (回复文本, 语气指令, EmotionState)，供 WebSocket 服务使用"""
-        from .emotional_router import EmotionState
-        emotion = "平静"
-        emotion_state = EmotionState(
-            primary_emotion="平静", intensity=0.3, confidence=0.5,
-            context=user_input, triggers=["日常"], timestamp=""
-        )
-        if self.use_emotional_mode and self.emotional_router:
-            try:
-                emotion_state = self.emotional_router.analyze_emotion(user_input, self.history)
-                emotion = emotion_state.primary_emotion
-            except Exception:
-                pass
-
-        text = self.chat(user_input)
-        instruct = self.EMOTION_INSTRUCT_MAP.get(emotion, self.EMOTION_INSTRUCT_MAP["平静"])
-        return text, instruct, emotion_state
-
-    def chat_with_live2d_unified(self, user_input):
+    async def chat_with_live2d_unified(self, user_input):
         """
-        统一生成模式：一次LLM调用同时生成对话和Live2D参数
+        统一生成模式：一次LLM调用同时生成对话和Live2D参数 (Async)
         返回: (回复文本, 语气指令, EmotionState, live2d_data)
         """
         from .emotional_router import EmotionState
         import time as _time
 
         # 1. Execute RAG Pipeline
-        tool_context, emotion_state, is_pure_emotional = self._execute_rag_pipeline(user_input)
+        tool_context, emotion_state, is_pure_emotional = await self._execute_rag_pipeline(user_input)
 
         # Ensure emotion_state exists for fallback/generation
         if not emotion_state:
@@ -443,7 +424,7 @@ class CompanionAgent:
         time_str = datetime.now().strftime("[%H:%M]")
         messages = self.history[1:] + [{"role": "user", "content": f"{time_str} {full_user_msg}"}]
 
-        unified_result = self.unified_generator.generate(
+        unified_result = await self.unified_generator.generate(
             messages=messages,
             emotion=emotion,
             intensity=emotion_state.intensity
@@ -475,14 +456,17 @@ class CompanionAgent:
         else:
             # Fallback: 分离生成
             print("[Companion] ⚠️ 统一生成失败，回退到分离模式")
-            # Note: This will trigger RAG pipeline again in chat()
-            text = self.chat(user_input)
+            # Note: This will trigger RAG pipeline again in chat() if we called chat() directly
+            # But here we already have tool_context, so we should just call LLM directly or implement fallback logic
+            # For simplicity, calling self.chat() which re-does RAG is safe but inefficient.
+            # Ideally we should split chat() to chat_with_context()
+            text = await self.chat(user_input)
             live2d_data = self.generate_live2d_params(text, emotion, emotion_state.intensity)
 
             # History and memory are handled inside self.chat()
 
         # 8. Trim History
-        self._trim_history()
+        await self._trim_history()
 
         instruct = self.EMOTION_INSTRUCT_MAP.get(emotion, self.EMOTION_INSTRUCT_MAP["平静"])
         return text, instruct, emotion_state, live2d_data
@@ -506,6 +490,7 @@ class CompanionAgent:
     def generate_live2d_params(self, reply_text: str, emotion: str, intensity: float) -> dict:
         """
         生成 Live2D 参数：优先 LLM 生成，失败回退到静态映射。
+        (Note: live2d_generator itself is sync currently, could be made async too)
         """
         result = self.live2d_generator.generate(reply_text, emotion, intensity)
         if result is not None:
